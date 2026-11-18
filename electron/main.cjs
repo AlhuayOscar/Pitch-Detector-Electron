@@ -1,9 +1,9 @@
 const { app, BrowserWindow, dialog, Menu, protocol, session } = require('electron');
 const { readFile } = require('node:fs/promises');
 const path = require('node:path');
-const { registerVocalRemover } = require('./uvr.cjs');
+const { registerVocalRemover, resolveVocalReference } = require('./uvr.cjs');
 const { registerPitchSessions } = require('./sessions.cjs');
-const { registerReferenceMedia } = require('./reference-media.cjs');
+const { registerReferenceMedia, findFfmpeg } = require('./reference-media.cjs');
 
 const appOrigin = 'pitch://app';
 const entryUrl = `${appOrigin}/index.html`;
@@ -120,8 +120,8 @@ function createWindow(guardWindow) {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   configureSession(session.defaultSession);
-  registerVocalRemover(app, entryUrl);
-  registerReferenceMedia(app, entryUrl);
+  registerVocalRemover(app, entryUrl, findFfmpeg);
+  registerReferenceMedia(app, entryUrl, resolveVocalReference);
   const guardWindow = registerPitchSessions(app, entryUrl);
   await createWindow(guardWindow);
 }).catch((error) => {

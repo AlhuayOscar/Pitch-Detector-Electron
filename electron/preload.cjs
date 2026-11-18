@@ -2,9 +2,16 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('vocalRemover', {
   status: () => ipcRenderer.invoke('uvr:status'),
-  launch: () => ipcRenderer.invoke('uvr:launch'),
-  locate: () => ipcRenderer.invoke('uvr:locate'),
-  openRelease: () => ipcRenderer.invoke('uvr:download'),
+  chooseInput: () => ipcRenderer.invoke('uvr:choose-input'),
+  chooseOutput: () => ipcRenderer.invoke('uvr:choose-output'),
+  separate: () => ipcRenderer.invoke('uvr:separate'),
+  cancel: () => ipcRenderer.invoke('uvr:cancel'),
+  openOutput: () => ipcRenderer.invoke('uvr:open-output'),
+  onProgress: (handler) => {
+    const listener = (_event, progress) => handler(progress);
+    ipcRenderer.on('uvr:progress', listener);
+    return () => ipcRenderer.removeListener('uvr:progress', listener);
+  },
 });
 
 contextBridge.exposeInMainWorld('pitchSessions', {
@@ -27,6 +34,7 @@ contextBridge.exposeInMainWorld('pitchSessions', {
 
 contextBridge.exposeInMainWorld('referenceMedia', {
   select: () => ipcRenderer.invoke('reference-media:select'),
+  selectVocals: (token) => ipcRenderer.invoke('reference-media:select-vocals', token),
   render: (semitones) => ipcRenderer.invoke('reference-media:render', semitones),
   cancel: () => ipcRenderer.invoke('reference-media:cancel'),
 });

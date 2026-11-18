@@ -8,6 +8,7 @@ interface PianoRollProps {
     playedNotes?: MidiSegment[];
     guideNotes?: MidiSegment[];
     guideLookaheadMs?: number;
+    guideMatches?: ReadonlyMap<number, { midi: number; atTime: number; source: 'voice' | 'instrument' }>;
     playedKeys?: ReadonlySet<number>;
     onNoteStart?: (midi: number) => void;
     onNoteEnd?: (midi: number) => void;
@@ -22,12 +23,14 @@ interface PianoRollProps {
 
 interface PitchedSegment extends MidiSegment {
     avgContinuousMidi: number;
+    guideId?: number;
 }
 
 export const PIANO_KEYBOARD_WIDTH = 58;
 export const VERTICAL_PIANO_KEYBOARD_HEIGHT = 58;
 const TIME_AXIS_HEIGHT = 30;
 const VERTICAL_TIME_AXIS_WIDTH = 42;
+const MATCH_LIFETIME_MS = 850;
 const blackKeys = new Set([1, 3, 6, 8, 10]);
 const timeFormat = new Intl.NumberFormat('es', { maximumFractionDigits: 1 });
 const durationFormat = new Intl.NumberFormat('es', { maximumFractionDigits: 2 });
@@ -41,6 +44,7 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
     let notesRef!: SVGGElement;
     let instrumentNotesRef!: SVGGElement;
     let guideNotesRef!: SVGGElement;
+    let guideMatchesRef!: SVGGElement;
     let tooltip: d3.Selection<HTMLDivElement, unknown, HTMLElement, unknown> | undefined;
     const [size, setSize] = createSignal({ width: 0, height: 0 });
     const [focusMidi, setFocusMidi] = createSignal<number>();
@@ -63,40 +67,61 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
         .domain([minMidi() - 0.5, maxMidi() + 0.5])
         .range(vertical() ? [0, chartWidth()] : [chartHeight(), 0]));
     const laneStart = (midi: number) => pitchScale()(midi + (vertical() ? -0.5 : 0.5));
-    const viewSeconds = () => Math.max(1, timeExtent() / props.pixelsPerSecond);
     const guideLookahead = () => props.guideLookaheadMs ?? 0;
     const guideEnabled = () => Number.isFinite(guideLookahead()) && guideLookahead() > 0;
-    const futureSeconds = () => guideEnabled() ? Math.min(viewSeconds() / 4, guideLookahead() / 1000) : 0;
-    const pastSeconds = () => viewSeconds() - futureSeconds();
-    const viewStart = () => props.viewEndTime - 1000 * pastSeconds();
+    const approachExtent = () => guideEnabled() ? timeExtent() * (vertical() ? 2 / 3 : 1 / 3) : 0;
+    const historyExtent = () => timeExtent() - approachExtent();
+    const keyThickness = () => vertical() ? VERTICAL_PIANO_KEYBOARD_HEIGHT : PIANO_KEYBOARD_WIDTH;
+    const keyOrigin = () => vertical() && !guideEnabled() ? chartHeight() : approachExtent();
+    const historyOrigin = () => keyOrigin() + keyThickness();
+    const viewSeconds = () => Math.max(1, historyExtent() / props.pixelsPerSecond);
+    const futureSeconds = () => Math.min(Math.max(1, approachExtent() / props.pixelsPerSecond), guideLookahead() / 1000);
+    const viewStart = () => props.viewEndTime - 1000 * viewSeconds();
     const guideViewEnd = () => props.viewEndTime + 1000 * futureSeconds();
     const timeScale = createMemo(() => d3.scaleLinear()
-        .domain([-futureSeconds(), pastSeconds()])
-        .range([0, timeExtent()])
+        .domain([0, viewSeconds()])
+        .range([0, historyExtent()])
         .clamp(true));
-    const nowPosition = () => timeScale()(0);
-    const timeTicks = createMemo(() => timeScale()
-        .ticks(Math.max(2, Math.floor(timeExtent() / (vertical() ? 78 : 105))))
+    const approachScale = createMemo(() => d3.scaleLinear()
+        .domain([0, futureSeconds()])
+        .range([0, approachExtent()])
+        .clamp(true));
+    const ticks = (scale: ReturnType<typeof timeScale>, extent: number) => scale
+        .ticks(Math.max(2, Math.floor(extent / (vertical() ? 78 : 105))))
         .filter(seconds => {
-            const position = timeScale()(seconds);
-            const minimumGap = vertical() ? 26 : 48;
-            return seconds !== 0 &&
-                position >= (guideEnabled() ? 25 : vertical() ? 36 : 60) &&
-                position <= timeExtent() - 25 &&
-                Math.abs(position - nowPosition()) >= minimumGap;
-        }));
-    const visibleNotes = (notes: MidiSegment[], latest = props.viewEndTime) => notes.filter((note): note is PitchedSegment =>
-        note.avgContinuousMidi !== null &&
-        Math.round(note.avgContinuousMidi) >= minMidi() &&
-        Math.round(note.avgContinuousMidi) <= maxMidi() &&
-        note.endTime >= viewStart() &&
-        note.startTime <= latest);
+            const position = scale(seconds);
+            return position >= (vertical() ? 36 : 60) && position <= extent - 25;
+        });
+    const historyTicks = createMemo(() => ticks(timeScale(), historyExtent()));
+    const approachTicks = createMemo(() => guideEnabled() ? ticks(approachScale(), approachExtent()) : []);
+    const visibleNotes = (notes: MidiSegment[], earliest = viewStart(), latest = props.viewEndTime) =>
+        notes.filter((note): note is PitchedSegment =>
+            note.avgContinuousMidi !== null &&
+            Math.round(note.avgContinuousMidi) >= minMidi() &&
+            Math.round(note.avgContinuousMidi) <= maxMidi() &&
+            note.endTime >= earliest &&
+            note.startTime <= latest);
     const notesInView = createMemo(() => visibleNotes(props.notes));
     const instrumentNotesInView = createMemo(() => visibleNotes(props.playedNotes ?? []));
-    const guideNotesInView = createMemo(() =>
-        guideEnabled() ? visibleNotes(props.guideNotes ?? [], guideViewEnd()) : []);
-    const tickLabel = (seconds: number) =>
-        `${seconds < 0 ? '+' : '−'}${timeFormat.format(Math.abs(seconds))} s`;
+    const incomingGuide = createMemo(() => guideEnabled()
+        ? visibleNotes(props.guideNotes ?? [], props.viewEndTime, guideViewEnd())
+            .filter(note => note.endTime > props.viewEndTime)
+        : []);
+    const pastGuide = createMemo(() => guideEnabled()
+        ? visibleNotes(props.guideNotes ?? []).filter(note => note.startTime < props.viewEndTime)
+        : []);
+    const targetKeys = createMemo(() => new Set(incomingGuide()
+        .filter(note => note.startTime <= props.viewEndTime)
+        .map(note => Math.round(note.avgContinuousMidi))));
+    const tickLabel = (seconds: number, incoming = false) =>
+        `${incoming ? '+' : '−'}${timeFormat.format(seconds)} s`;
+    const matchesInView = createMemo(() => {
+        if (!guideEnabled() || !props.guideMatches) return [];
+        const now = props.viewEndTime;
+        return Array.from(props.guideMatches).filter(([, match]) =>
+            match.midi >= minMidi() && match.midi <= maxMidi() &&
+            match.atTime <= now && now - match.atTime < MATCH_LIFETIME_MS);
+    });
 
     function beginKey(input: number | string, midi: number) {
         if (!playable() || heldInputs.has(input)) return;
@@ -184,42 +209,62 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
         }, 160));
     }
 
+    const gridHeight = () => guideEnabled() && vertical() ? size().height : chartHeight();
+    const gridWidth = () => guideEnabled() && !vertical() ? size().width : chartWidth();
+
     function laneRect(midi: number) {
         const start = laneStart(midi);
         return vertical()
-            ? { x: start, y: 0, width: laneSize(), height: chartHeight() }
-            : { x: 0, y: start, width: chartWidth(), height: laneSize() };
+            ? { x: start, y: 0, width: laneSize(), height: gridHeight() }
+            : { x: 0, y: start, width: gridWidth(), height: laneSize() };
     }
 
     function pitchLine(midi: number) {
         const start = laneStart(midi);
         return vertical()
-            ? { x1: start, x2: start, y1: 0, y2: chartHeight() }
-            : { x1: 0, x2: chartWidth(), y1: start, y2: start };
+            ? { x1: start, x2: start, y1: 0, y2: gridHeight() }
+            : { x1: 0, x2: gridWidth(), y1: start, y2: start };
     }
 
-    function timelineLine(seconds: number) {
-        const age = timeScale()(seconds);
-        return vertical()
-            ? { x1: 0, x2: chartWidth(), y1: chartHeight() - age, y2: chartHeight() - age }
-            : { x1: age, x2: age, y1: 0, y2: chartHeight() };
+    function timelinePosition(seconds: number, incoming = false) {
+        if (guideEnabled()) {
+            return incoming
+                ? keyOrigin() - approachScale()(seconds)
+                : historyOrigin() + timeScale()(seconds);
+        }
+        const distance = timeScale()(seconds);
+        return vertical() ? chartHeight() - distance : distance;
     }
 
-    function futureRect() {
-        const position = nowPosition();
+    function timelineLine(seconds: number, incoming = false) {
+        const position = timelinePosition(seconds, incoming);
         return vertical()
-            ? { x: 0, y: chartHeight() - position, width: chartWidth(), height: position }
-            : { x: 0, y: 0, width: position, height: chartHeight() };
+            ? { x1: 0, x2: chartWidth(), y1: position, y2: position }
+            : { x1: position, x2: position, y1: 0, y2: chartHeight() };
     }
 
-    function noteRect(midi: number, age: number, length: number) {
+    function noteRect(midi: number, distance: number, length: number, incoming = false) {
+        const origin = laneStart(midi);
+        const axis = incoming
+            ? keyOrigin() - distance - length
+            : guideEnabled() ? historyOrigin() + distance : vertical() ? chartHeight() - distance - length : distance;
         return vertical()
-            ? { x: laneStart(midi), y: chartHeight() - age - length, width: laneFill(), height: length }
-            : { x: age, y: laneStart(midi), width: length, height: laneFill() };
+            ? { x: origin, y: axis, width: laneFill(), height: length }
+            : { x: axis, y: origin, width: length, height: laneFill() };
+    }
+
+    function approachRect(note: PitchedSegment) {
+        const extent = approachExtent();
+        const minimum = Math.min(1, extent);
+        const now = props.viewEndTime;
+        const distance = Math.min(approachScale()((note.startTime - now) / 1000), extent - minimum);
+        const end = Math.min(note.endTime, guideViewEnd());
+        const far = approachScale()((end - now) / 1000);
+        return noteRect(Math.round(note.avgContinuousMidi), distance, Math.max(minimum, far - distance), true);
     }
 
     function segmentRect(note: PitchedSegment) {
-        const extent = timeExtent();
+        const extent = historyExtent();
         const minimum = Math.min(1, extent);
         const ageOf = (timestamp: number) => timeScale()((props.viewEndTime - timestamp) / 1000);
         const age = Math.min(ageOf(note.endTime), extent - minimum);
@@ -247,9 +292,11 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
         const pitch = pitchScale()(midi);
         if (vertical()) {
             const x = chartLeft() + pitch;
-            return { x1: x, x2: x, y1: chartHeight() - 11, y2: chartHeight() + 13 };
+            const edge = guideEnabled() ? historyOrigin() : chartHeight();
+            return { x1: x, x2: x, y1: edge - 11, y2: edge + 13 };
         }
-        return { x1: PIANO_KEYBOARD_WIDTH - 13, x2: Math.min(PIANO_KEYBOARD_WIDTH + 11, size().width), y1: pitch, y2: pitch };
+        const edge = historyOrigin();
+        return { x1: edge - 13, x2: Math.min(edge + 11, size().width), y1: pitch, y2: pitch };
     }
 
     const livePitch = createMemo(() => {
@@ -276,7 +323,8 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
             note.endTime === props.viewEndTime && Math.round(note.avgContinuousMidi) === current.note);
     });
 
-    const translatedChart = () => `translate(${chartLeft()}, 0)`;
+    const chartOffset = () => guideEnabled() && !vertical() ? 0 : chartLeft();
+    const translatedChart = () => `translate(${chartOffset()}, 0)`;
     const formattedNote = (midi: number) => midiToNoteName(midi).replace('#', '♯');
     const hideTooltip = () => tooltip?.style('opacity', 0);
 
@@ -326,12 +374,10 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
         const layout = notesInView().map(note => {
             const midi = Math.round(note.avgContinuousMidi);
             const box = segmentRect(note);
-            const duration = rotated ? box.height : box.width;
             const center = pitchScale()(midi);
             const actual = pitchScale()(note.avgContinuousMidi);
             const label = formattedNote(midi);
-            const showLabel = (rotated ? laneFill() : duration) >= label.length * 7 + 8 &&
-                (rotated ? duration : laneFill()) >= 12;
+            const showLabel = box.width >= label.length * 7 + 8 && box.height >= 12;
             return {
                 note,
                 midi,
@@ -341,7 +387,7 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                     : { x1: box.x, x2: box.x + box.width, y1: actual, y2: actual },
                 label,
                 labelX: rotated ? center : box.x + 4,
-                labelY: rotated ? box.y + box.height - 6 : center,
+                labelY: rotated ? (guideEnabled() ? box.y + 9 : box.y + box.height - 6) : center,
                 showLabel,
                 color: tuningColor(Math.abs(note.avgContinuousMidi - midi) * 100),
             };
@@ -403,16 +449,20 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
             .attr('height', entry => entry.box.height);
     });
 
-    createEffect(() => {
-        const notes = chartWidth() > 0 && chartHeight() > 0 ? guideNotesInView() : [];
-        const now = props.viewEndTime;
-        const layout = notes.map(note => ({ note, box: segmentRect(note) }));
-        d3.select(guideNotesRef)
-            .selectAll<SVGRectElement, typeof layout[number]>('rect.guide-note')
-            .data(layout, entry => `${entry.note.avgContinuousMidi}:${entry.note.startTime}:${entry.note.endTime}`)
-            .join('rect')
-            .attr('class', 'guide-note')
-            .classed('guide-note-current', entry => entry.note.startTime <= now && now < entry.note.endTime)
+    function paintGuide(
+        notes: PitchedSegment[],
+        className: 'guide-note' | 'guide-past-note',
+        rectangle: typeof approachRect,
+    ) {
+        const layout = chartWidth() > 0 && chartHeight() > 0
+            ? notes.map(note => ({ note, box: rectangle(note) }))
+            : [];
+        return d3.select(guideNotesRef)
+            .selectAll<SVGRectElement, typeof layout[number]>(`rect.${className}`)
+            .data(layout, entry => entry.note.guideId ?? `${entry.note.avgContinuousMidi}:${entry.note.startTime}:${entry.note.endTime}`)
+            .join(enter => enter.append('rect').attr('class', className))
+            .classed('guide-note-matched', entry => entry.note.guideId !== undefined && !!props.guideMatches?.has(entry.note.guideId))
+            .attr('data-guide-id', entry => entry.note.guideId ?? null)
             .attr('data-midi', entry => Math.round(entry.note.avgContinuousMidi))
             .attr('data-start-time', entry => entry.note.startTime)
             .attr('data-end-time', entry => entry.note.endTime)
@@ -421,6 +471,26 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
             .attr('y', entry => entry.box.y)
             .attr('width', entry => entry.box.width)
             .attr('height', entry => entry.box.height);
+    }
+
+    createEffect(() => {
+        paintGuide(pastGuide(), 'guide-past-note', segmentRect);
+        paintGuide(incomingGuide(), 'guide-note', approachRect)
+            .classed('guide-note-current', entry => entry.note.startTime <= props.viewEndTime);
+    });
+
+    createEffect(() => {
+        const flashes = matchesInView();
+        d3.select(guideMatchesRef)
+            .selectAll<SVGCircleElement, typeof flashes[number]>('circle.guide-match-flash')
+            .data(flashes, ([id]) => id)
+            .join(enter => enter.append('circle').attr('class', 'guide-match-flash'))
+            .attr('data-guide-id', ([id]) => id)
+            .attr('data-midi', ([, match]) => match.midi)
+            .attr('data-source', ([, match]) => match.source)
+            .attr('cx', ([, match]) => vertical() ? pitchScale()(match.midi) : keyOrigin())
+            .attr('cy', ([, match]) => vertical() ? keyOrigin() : pitchScale()(match.midi))
+            .attr('r', Math.max(3, Math.min(9, laneSize() * 0.55)));
     });
 
     return (
@@ -432,20 +502,22 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
             data-orientation={vertical() ? 'vertical' : 'horizontal'}
             data-guide={guideEnabled() ? 'active' : undefined}
             aria-label={guideEnabled()
-                ? 'Historial de notas con guía. La línea Ahora separa las notas próximas del historial.'
+                ? 'Historial con guía. Las notas de la guía se acercan a las teclas. La voz y el instrumento se alejan de las teclas en el historial.'
                 : vertical()
                     ? 'Historial de notas. Las notas nuevas suben desde el piano de abajo. La barra marca la altura de la voz.'
                     : 'Historial de notas. Las notas nuevas salen del piano de la izquierda. La barra marca la altura de la voz.'}
             onPointerLeave={hideTooltip}
         >
-            <rect width={size().width} height={chartHeight()} fill="#111c27" />
+            <rect width={size().width} height={gridHeight()} fill="#111c27" />
             <g class="grid" transform={translatedChart()}>
+                <Show when={guideEnabled()}>
+                    <rect class="guide-approach-panel" x="0" y="0"
+                        width={vertical() ? chartWidth() : approachExtent()}
+                        height={vertical() ? approachExtent() : chartHeight()} />
+                </Show>
                 <For each={accidentals()}>{midi =>
                     <rect {...laneRect(midi)} fill="#0e1823" />
                 }</For>
-                <Show when={guideEnabled()}>
-                    <rect class="guide-future-band" {...futureRect()} />
-                </Show>
                 <Show when={livePitch()}>{current =>
                     <rect
                         class="active-note-row"
@@ -459,8 +531,11 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                     <line {...pitchLine(midi)}
                         stroke={midi % 12 === 0 ? '#344658' : '#202e3c'} />
                 }</For>
-                <For each={timeTicks()}>{seconds =>
+                <For each={historyTicks()}>{seconds =>
                     <line {...timelineLine(seconds)} stroke="#202e3c" />
+                }</For>
+                <For each={approachTicks()}>{seconds =>
+                    <line {...timelineLine(seconds, true)} stroke="#253448" />
                 }</For>
             </g>
             <g class="guide-notes" transform={translatedChart()} ref={guideNotesRef} aria-hidden="true" />
@@ -470,18 +545,18 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                     class="note-preview"
                     data-midi={current().note}
                     transform={translatedChart()}
-                    {...noteRect(current().note, nowPosition(), Math.min(3, timeExtent() - nowPosition()))}
+                    {...noteRect(current().note, 0, Math.min(3, historyExtent()))}
                     fill="#67e8cb"
                     pointer-events="none"
                 />
             }</Show>
             <g class="instrument-notes" transform={translatedChart()} ref={instrumentNotesRef} />
-            <Show when={guideEnabled()}>
-                <line class="guide-now-line" transform={translatedChart()} {...timelineLine(0)} />
-            </Show>
             <g class="keyboard" role={playable() ? 'group' : undefined}
                 aria-label={playable() ? 'Piano interactivo. Usa las flechas para elegir una tecla y pulsa Enter o Espacio para tocarla.' : undefined}
-                transform={vertical() ? `translate(${chartLeft()}, ${chartHeight()})` : undefined}>
+                transform={vertical() ? `translate(${chartLeft()}, ${keyOrigin()})` : guideEnabled() ? `translate(${keyOrigin()}, 0)` : undefined}>
+                <Show when={guideEnabled() && !vertical()}>
+                    <rect width={PIANO_KEYBOARD_WIDTH} height={chartHeight()} fill="#101923" />
+                </Show>
                 <Show when={vertical()}>
                     <rect width={chartWidth()} height={VERTICAL_PIANO_KEYBOARD_HEIGHT} fill="#334152" />
                     <For each={accidentals()}>{midi =>
@@ -526,7 +601,10 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                                 <rect class="played-key" data-midi={midi} {...keyRect(midi)}
                                     fill-opacity={active() ? 0.12 : 0.88} aria-hidden="true" />
                             </Show>
-                            <Show when={(vertical() ? laneSize() >= 31 : laneSize() >= 13) || midi % 12 === 0 || active() || played()}>
+                            <Show when={targetKeys().has(midi)}>
+                                <rect class="guide-target-key" data-midi={midi} {...keyRect(midi)} aria-hidden="true" />
+                            </Show>
+                            <Show when={(vertical() ? laneSize() >= 31 : laneSize() >= 13) || midi % 12 === 0 || active() || played() || targetKeys().has(midi)}>
                                 <text class="key-label"
                                     x={vertical() ? pitchScale()(midi) : 8}
                                     y={vertical() ? (isAccidental ? 24 : 44) : pitchScale()(midi)}
@@ -538,6 +616,10 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                     );
                 }}</For>
             </g>
+            <Show when={guideEnabled()}>
+                <line class="guide-now-line" transform={translatedChart()} {...timelineLine(0, true)} />
+            </Show>
+            <g transform={translatedChart()} ref={guideMatchesRef} aria-hidden="true" />
             <Show when={livePitch()}>{current =>
                 <line
                     class="voice-pitch-marker"
@@ -546,29 +628,39 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                 />
             }</Show>
             <Show when={vertical()} fallback={
-                <g class="time-axis" transform={`translate(${PIANO_KEYBOARD_WIDTH}, ${chartHeight()})`}>
-                    <line x1={-PIANO_KEYBOARD_WIDTH} x2={chartWidth()} stroke="#344658" />
+                <g class="time-axis" transform={`translate(${chartOffset()}, ${chartHeight()})`}>
+                    <line x1={guideEnabled() ? 0 : -PIANO_KEYBOARD_WIDTH} x2={gridWidth()} stroke="#344658" />
                     <text class="time-now" classList={{ 'guide-time-now': guideEnabled() }}
-                        x={guideEnabled() ? nowPosition() : 4} y="19">
+                        x={guideEnabled() ? keyOrigin() + 4 : 4} y="19">
                         {guideEnabled() ? 'Ahora' : '0 s'}
                     </text>
-                    <For each={timeTicks()}>{seconds =>
-                        <text class="time-label" x={timeScale()(seconds)} y="19">
+                    <For each={historyTicks()}>{seconds =>
+                        <text class="time-label" x={timelinePosition(seconds)} y="19">
                             {tickLabel(seconds)}
+                        </text>
+                    }</For>
+                    <For each={approachTicks()}>{seconds =>
+                        <text class="time-label" x={timelinePosition(seconds, true)} y="19">
+                            {tickLabel(seconds, true)}
                         </text>
                     }</For>
                 </g>
             }>
                 <g class="time-axis vertical-time-axis">
-                    <line x1={chartLeft()} x2={size().width} y1={chartHeight()} y2={chartHeight()} stroke="#344658" />
+                    <line x1={chartLeft()} x2={size().width} y1={keyOrigin()} y2={keyOrigin()} stroke="#344658" />
                     <line x1={chartLeft()} x2={chartLeft()} y2={size().height} stroke="#344658" />
                     <text class="time-now" classList={{ 'guide-time-now': guideEnabled() }}
-                        x={chartLeft() - 8} y={chartHeight() - (guideEnabled() ? nowPosition() : 9)}>
+                        x={chartLeft() - 8} y={guideEnabled() ? keyOrigin() : chartHeight() - 9}>
                         {guideEnabled() ? 'Ahora' : '0 s'}
                     </text>
-                    <For each={timeTicks()}>{seconds =>
-                        <text class="time-label" x={chartLeft() - 8} y={chartHeight() - timeScale()(seconds)}>
+                    <For each={historyTicks()}>{seconds =>
+                        <text class="time-label" x={chartLeft() - 8} y={timelinePosition(seconds)}>
                             {tickLabel(seconds)}
+                        </text>
+                    }</For>
+                    <For each={approachTicks()}>{seconds =>
+                        <text class="time-label" x={chartLeft() - 8} y={timelinePosition(seconds, true)}>
+                            {tickLabel(seconds, true)}
                         </text>
                     }</For>
                 </g>

@@ -1,0 +1,48 @@
+.guide-vocal-range {
+    margin-top: 6px;
+    border-top: 1px solid #38516c;
+}
+
+.song-guide .guide-vocal-range > summary {
+    min-height: 28px;
+    padding: 4px 0;
+    color: #b8d1fa;
+    font-size: 11px;
+}
+
+.song-guide .guide-vocal-range > summary::after { transform: none; }
+.song-guide .guide-vocal-range[open] > summary::after { transform: rotate(180deg); }
+
+.guide-range-content {
+    display: grid;
+    gap: 6px;
+    padding-bottom: 2px;
+    font-size: 11px;
+    color: #bccde0;
+}
+
+.guide-range-controls, .guide-range-suggestion {
+    display: flex;
+    align-items: end;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+}
+
+.guide-range-controls label { display: grid; gap: 3px; }
+.guide-range-controls select {
+    min-height: 28px;
+    min-width: 66px;
+    padding: 4px 6px;
+    border: 1px solid #49648c;
+    border-radius: 6px;
+    background: #1c2b40;
+    color: #e0ecff;
+    font: inherit;
+}
+
+.guide-vocal-range .rotate-button { height: 28px; padding: 0 8px; font-size: 11px; }
+.guide-range-suggestion { justify-content: space-between; align-items: center; }
+.guide-range-suggestion strong { color: #e1efff; }
+.guide-range-suggestion p { margin: 3px 0 0; }
+.guide-range-warning { color: #ffd2a6; }
+.guide-range-applied { color: #a7f5cf; }

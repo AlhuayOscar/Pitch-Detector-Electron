@@ -10,13 +10,13 @@ La primera etapa del coordinador se desarrolla en la rama `Automatized`. Su alca
 
 ## Abrir y usar
 
-1. Descargá `Pitch-Detector-1.3.0-Windows-x64-Portable.exe` y abrilo en Windows de 64 bits. [Descargar la versión portátil](https://github.com/AlhuayOscar/Pitch-Detector-Electron/releases/latest).
+1. Para probar esta rama en Windows x64, compilá con `npm run package:win` y abrí `release/Pitch-Detector-1.4.0-automatized.2-Windows-x64-Portable.exe`. [Versiones estables](https://github.com/AlhuayOscar/Pitch-Detector-Electron/releases/latest).
 2. Elegí **Pitch** en el inicio, pulsá **Iniciar detección** y cantá una nota sostenida cerca del micrófono. La aplicación muestra la nota, la frecuencia, la confianza, la afinación y el historial.
 3. Usá **Pausar** para detener el análisis y liberar el micrófono. Pulsá **Reanudar** para seguir.
 
 Las notas entran en el historial desde el teclado de la izquierda y avanzan hacia la derecha. Pulsá **Rotar sistema** para colocar el teclado abajo y ver cómo las notas suben desde las teclas. La tecla de la nota detectada queda resaltada. La barra junto al teclado sigue la altura de la voz y un brillo más suave señala hacia qué tecla se desvía la afinación.
 
-La versión portátil incluye Electron, TensorFlow.js, el modelo SPICE v2 completo y la tipografía. El análisis ocurre en el equipo. Pitch bloquea las solicitudes externas y no guarda grabaciones. Usa el micrófono predeterminado de Windows.
+La versión portátil incluye Electron, TensorFlow.js, el modelo SPICE v2 completo y la tipografía. El análisis ocurre en el equipo. Pitch bloquea las solicitudes externas y guarda las grabaciones de sesión en el equipo. Usa el micrófono predeterminado de Windows.
 
 Si Windows bloqueó el micrófono, abrí **Configuración → Privacidad y seguridad → Micrófono** y verificá el acceso para las aplicaciones de escritorio.
 
@@ -30,21 +30,21 @@ Si Windows bloqueó el micrófono, abrí **Configuración → Privacidad y segur
 
 ## Coordinador de voz en Automatized
 
-La rama experimental agrega **Guía de canción** dentro de **Pitch**. Usa FFmpeg instalado o el que prepara VocalRemover en este proyecto. En la guía, cargá un MP3, WAV, MP4 u otro audio o video local de hasta 10 minutos. Cada archivo puede ocupar hasta 1 GB.
+En **Pitch**, abrí **Guía de canción → Cargar MP3 o video** para analizar un MP3 de voces, WAV, MP4 u otro audio o video local. El límite es de 10 minutos y 1 GB por archivo. También podés enviar la pista de voz desde **VocalRemover → Practicar con la voz**. La guía usa FFmpeg instalado o el del entorno local de este proyecto.
 
-Reproducí la referencia y activá la detección de Pitch para cantar encima. Las notas de la guía aparecen semitransparentes detrás del historial. La línea **Ahora** separa las notas que ya pasaron de las próximas. La guía muestra el rango, la nota objetivo y el desvío de tu voz en cents cuando hay una nota activa.
+Pulsá **Reproducir guía**. Con el piano horizontal, las notas transparentes bajan desde arriba y tu voz o el instrumento salen hacia abajo. Al rotarlo, la guía llega desde la izquierda y lo que tocás o cantás sale hacia la derecha. La tecla se resalta al llegar su nota. Podés tocar el piano en pantalla o activar **Iniciar detección** para cantar.
 
-El selector **Transposición** baja tanto la reproducción como las notas de la guía hasta una octava. La duración se mantiene para que las pistas sigan alineadas. El análisis estima el tono predominante de una línea melódica. Para canciones con acompañamiento fuerte podés usar la pista de voz que exporta VocalRemover.
+**Desvanecer coincidencias** muestra un destello en la tecla y desvanece la nota objetivo cuando tocás su tecla o la cantás con un desvío de hasta 35 cents. El audio y los eventos guardados se conservan.
+
+**Transposición** mueve la reproducción y las notas de la guía hasta una octava en cada sentido, conservando el tempo. En **Ajustar a mi rango** elegí la nota más grave y la más aguda que te resulten cómodas, o tomá el rango observado por Pitch como punto de partida. La app recomienda un ajuste y muestra cuánto de la melodía queda dentro de ese intervalo antes de aplicarlo. Para pistas con acompañamiento fuerte, podés usar la voz que exporta VocalRemover.
 
 La guía usa un estimador de frecuencia fundamental basado en YIN. [Artículo de de Cheveigné y Kawahara](https://pubmed.ncbi.nlm.nih.gov/12002874/).
 
 ## VocalRemover
 
-El mosaico **VocalRemover** abre la ventana oficial de Ultimate Vocal Remover 5.6. La separación se ejecuta en el equipo mediante los modelos descargados.
+**VocalRemover** separa pistas desde su propia pantalla en Electron. Seleccioná el archivo de entrada y la carpeta de salida, y pulsá **Separar voz e instrumental**. El proceso usa el motor local de UVR 5.6 y el modelo **MDX-Net Inst Main** en CPU. Al finalizar, podés abrir la carpeta con los dos WAV o pulsar **Practicar con la voz** para cargar la pista vocal directamente en Pitch.
 
-- Si ya instalaste Ultimate Vocal Remover en Windows, abrí el mosaico y pulsá **Abrir Ultimate Vocal Remover**. **Buscar UVR instalado** permite seleccionar manualmente su ejecutable. [Descarga oficial de UVR 5.6](https://github.com/Anjok07/ultimatevocalremovergui/releases/tag/v5.6).
-- Desde una copia de este repositorio podés preparar el entorno local con Python 3.10 y FFmpeg disponibles. Ejecutá `.\scripts\prepare-uvr.ps1` en PowerShell. El entorno queda en `.uvr/`, fuera de Git, y se detecta desde el programa portátil en `release/`. La preparación inicial descarga el código, las dependencias y el modelo.
-- En UVR, elegí **MDX-Net**, seleccioná **UVR-MDX-NET Inst Main**, indicá el archivo de entrada y la carpeta de salida, y pulsá **Start Processing**. La instalación oficial puede requerir agregar este modelo una vez desde el centro de descargas de UVR.
+Para preparar el entorno en otra PC, ejecutá `.\scripts\prepare-uvr.ps1` desde el repositorio en PowerShell con Python 3.10 x64 y FFmpeg disponibles. La preparación inicial descarga el motor y el modelo. Ambos quedan en `.uvr/`, fuera de Git, y se detectan desde el portátil en `release/`. Después de esta preparación, la separación funciona sin conexión.
 
 ## Compilar desde el código
 
@@ -62,7 +62,7 @@ Para generar el ejecutable portátil de Windows x64:
 npm run package:win
 ```
 
-El ejecutable queda en `release/`. La preparación inicial descarga las dependencias y las herramientas de empaquetado. Pitch funciona sin conexión desde el primer arranque. VocalRemover usa el entorno local preparado o una instalación existente de UVR.
+El ejecutable queda en `release/`. La preparación inicial descarga las dependencias y las herramientas de empaquetado. Pitch funciona sin conexión desde el primer arranque. VocalRemover usa el entorno local de UVR preparado junto al proyecto.
 
 `npm run dev` inicia la versión web local de Vite y `npm run build:pages` compila para la ruta de GitHub Pages del proyecto original.
 

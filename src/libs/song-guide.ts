@@ -1,10 +1,12 @@
 import { batch, createMemo, createSignal, onCleanup } from 'solid-js';
 import type { MidiSegment } from '../pages/Demo';
 import { midiToNoteName } from '../utils/midiUtils';
-import type { ReferenceMediaBridge } from './reference-bridge';
+import type { ReferenceMedia, ReferenceMediaBridge } from './reference-bridge';
 import type { ReferenceNote } from './reference-transcription';
 
-export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => number, onTick: () => void) {
+export const GUIDE_MATCH_CENTS = 35;
+
+export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => number, onTick: () => void, onLoaded: () => void) {
     const audio = new Audio();
     audio.preload = 'metadata';
     audio.volume = 0.55;
@@ -16,26 +18,49 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
     const [playing, setPlaying] = createSignal(false);
     const [busy, setBusy] = createSignal('');
     const [error, setError] = createSignal('');
+    const [revision, setRevision] = createSignal(0);
     let url: string | undefined;
     let worker: Worker | undefined;
     let stopAnalysis: (() => void) | undefined;
     let operation = 0;
+    let frame: number | undefined;
 
-    const pause = () => {
-        audio.pause();
-        setPlaying(false);
-    };
     const update = () => batch(() => {
         setPosition(audio.currentTime * 1000);
         onTick();
     });
-    const clock = window.setInterval(() => {
-        if (!audio.paused && !audio.ended) update();
-    }, 45);
-    audio.addEventListener('ended', () => {
+
+    const step = () => {
+        frame = undefined;
+        update();
+        if (!audio.paused && !audio.ended) frame = requestAnimationFrame(step);
+    };
+
+    const stopClock = () => {
+        if (frame !== undefined) cancelAnimationFrame(frame);
+        frame = undefined;
+    };
+
+    const startClock = () => {
+        setPlaying(true);
+        if (frame === undefined) step();
+    };
+
+    const syncPaused = () => {
+        stopClock();
         setPlaying(false);
         update();
-    });
+    };
+
+    const pause = () => {
+        audio.pause();
+        syncPaused();
+    };
+
+    audio.addEventListener('playing', startClock);
+    audio.addEventListener('pause', syncPaused);
+    audio.addEventListener('ended', syncPaused);
+    audio.addEventListener('seeked', update);
 
     const showError = (cause: unknown) => {
         const text = cause instanceof Error ? cause.message.replace(/^Error invoking remote method '[^']+': Error: /, '') : '';
@@ -84,13 +109,13 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
         update();
     };
 
-    const choose = async () => {
+    const load = async (select: () => Promise<ReferenceMedia | null>, opening: string) => {
         const id = ++operation;
         pause();
-        setBusy('Abriendo archivo…');
+        setBusy(opening);
         setError('');
         try {
-            const media = await bridge.select();
+            const media = await select();
             if (!media || operation !== id) return;
             setName(media.name);
             setNotes([]);
@@ -100,9 +125,13 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
             setBusy('Analizando notas…');
             const [result, playback] = await Promise.all([analyze(media.samples), bridge.render(0)]);
             if (operation !== id) return;
-            setPlayback(playback.wav, media.durationSeconds);
-            setNotes(result);
-            if (!result.length) setError('No se distinguieron notas estables en este audio.');
+            batch(() => {
+                setPlayback(playback.wav, media.durationSeconds);
+                setNotes(result);
+                setRevision(previous => previous + 1);
+                if (result.length) onLoaded();
+                else setError('No se distinguieron notas estables en este audio.');
+            });
         } catch (cause) {
             if (operation === id) {
                 stopAnalysis?.();
@@ -113,6 +142,9 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
         }
     };
 
+    const choose = () => load(() => bridge.select(), 'Abriendo archivo…');
+    const loadVocals = (token: string) => load(() => bridge.selectVocals(token), 'Preparando la pista de voz…');
+
     const transpose = async (shift: number) => {
         if (busy() || !Number.isInteger(shift) || shift === semitones()) return;
         pause();
@@ -122,8 +154,11 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
         try {
             const result = await bridge.render(shift);
             if (operation !== id) return;
-            setPlayback(result.wav, result.durationSeconds, position());
-            setSemitones(shift);
+            batch(() => {
+                setPlayback(result.wav, result.durationSeconds, position());
+                setSemitones(shift);
+                setRevision(previous => previous + 1);
+            });
         } catch (cause) {
             if (operation === id) showError(cause);
         } finally {
@@ -141,13 +176,10 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
     const toggle = async () => {
         if (playing()) {
             pause();
-            update();
         } else if (duration() > 0) {
             try {
-                if (audio.ended) audio.currentTime = 0;
+                if (audio.ended) seek(0);
                 await audio.play();
-                setPlaying(true);
-                update();
             } catch (cause) {
                 showError(cause);
             }
@@ -157,6 +189,7 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
     const seek = (ms: number) => {
         if (!duration()) return;
         audio.currentTime = ms / 1000;
+        setRevision(previous => previous + 1);
         update();
     };
 
@@ -169,9 +202,13 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
         return values ? midiToNoteName(values.low) + ' – ' + midiToNoteName(values.high) : '';
     });
 
+    const targetNote = createMemo(() => {
+        const time = position();
+        return notes().find(note => note.startMs <= time && note.endMs > time);
+    });
     const target = createMemo(() => {
-        const match = notes().find(note => note.startMs <= position() && note.endMs > position());
-        return match ? match.midi + semitones() : null;
+        const note = targetNote();
+        return note ? note.midi + semitones() : null;
     });
 
     const chartNotes = createMemo<MidiSegment[]>(() => {
@@ -181,6 +218,7 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
             startTime: anchor + note.startMs,
             endTime: anchor + note.endMs,
             duration: note.endMs - note.startMs,
+            guideId: note.startMs,
             avgContinuousMidi: note.midi + semitones(),
             avgConfidence: note.confidence,
         }));
@@ -188,14 +226,18 @@ export function createSongGuide(bridge: ReferenceMediaBridge, chartTime: () => n
 
     onCleanup(() => {
         cancel();
-        pause();
-        clearInterval(clock);
+        stopClock();
+        audio.removeEventListener('playing', startClock);
+        audio.removeEventListener('pause', syncPaused);
+        audio.removeEventListener('ended', syncPaused);
+        audio.removeEventListener('seeked', update);
+        audio.pause();
         audio.removeAttribute('src');
         audio.load();
         if (url) URL.revokeObjectURL(url);
     });
 
-    return { name, notes, duration, position, semitones, playing, busy, error, choose, transpose, toggle, seek, pause, cancel, range, bounds, target, chartNotes };
+    return { name, notes, duration, position, semitones, playing, busy, error, choose, loadVocals, transpose, toggle, seek, pause, cancel, range, bounds, target, targetNote, revision, chartNotes };
 }
 
 export type SongGuide = ReturnType<typeof createSongGuide>;

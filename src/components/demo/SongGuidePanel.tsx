@@ -1,17 +1,35 @@
 import { AudioLines, FileAudio, LoaderCircle, Pause, Play, Square } from 'lucide-solid';
-import { For, Show, type Component } from 'solid-js';
-import type { SongGuide } from '../../libs/song-guide';
+import { For, onMount, Show, type Component } from 'solid-js';
+import { GUIDE_MATCH_CENTS, type SongGuide } from '../../libs/song-guide';
+import GuideVocalRange from './GuideVocalRange';
 import { midiToNoteName } from '../../utils/midiUtils';
 import './song-guide.css';
 
-const shifts = Array.from({ length: 13 }, (_, index) => -index);
+const shifts = Array.from({ length: 25 }, (_, index) => index - 12);
 
 function formatTime(milliseconds: number) {
     const total = Math.floor(milliseconds / 1000);
     return Math.floor(total / 60) + ':' + String(total % 60).padStart(2, '0');
 }
 
-const SongGuidePanel: Component<{ guide: SongGuide; liveMidi: number | null | undefined }> = (props) => {
+interface Props {
+    guide: SongGuide;
+    liveMidi?: number | null;
+    initiallyOpen?: boolean;
+    playedKeys: ReadonlySet<number>;
+    fadeMatches: boolean;
+    onFadeMatches: (enabled: boolean) => void;
+    observedRange?: string;
+}
+
+const SongGuidePanel: Component<Props> = (props) => {
+    let details!: HTMLDetailsElement;
+    onMount(() => { if (props.initiallyOpen) details.open = true; });
+
+    const pianoMatches = () => {
+        const target = props.guide.target();
+        return target !== null && props.playedKeys.has(target);
+    };
     const cents = () => {
         const target = props.guide.target();
         const live = props.liveMidi;
@@ -19,7 +37,7 @@ const SongGuidePanel: Component<{ guide: SongGuide; liveMidi: number | null | un
     };
 
     return (
-        <details class="song-guide">
+        <details ref={details} class="song-guide">
             <summary>
                 <AudioLines size={16} aria-hidden="true" />
                 Guía de canción
@@ -30,7 +48,7 @@ const SongGuidePanel: Component<{ guide: SongGuide; liveMidi: number | null | un
                 <div class="guide-controls">
                     <button type="button" class="rotate-button" data-action="select-guide"
                         disabled={!!props.guide.busy()} onClick={() => void props.guide.choose()}>
-                        <FileAudio size={16} aria-hidden="true" /> Cargar audio o video
+                        <FileAudio size={16} aria-hidden="true" /> Cargar MP3 o video
                     </button>
                     <Show when={props.guide.duration() > 0}>
                         <button type="button" class="rotate-button guide-play" data-action="play-guide"
@@ -48,7 +66,7 @@ const SongGuidePanel: Component<{ guide: SongGuide; liveMidi: number | null | un
                                     control.value = String(props.guide.semitones());
                                 });
                             }}>
-                                <For each={shifts}>{shift => <option value={shift}>{shift === 0 ? 'Original' : String(shift) + ' semitonos'}</option>}</For>
+                                <For each={shifts}>{shift => <option value={shift}>{shift === 0 ? 'Original' : (shift > 0 ? '+' : '') + shift + ' semitonos'}</option>}</For>
                             </select>
                         </label>
                     </Show>
@@ -76,11 +94,22 @@ const SongGuidePanel: Component<{ guide: SongGuide; liveMidi: number | null | un
                             <span>Nota objetivo <strong data-testid="guide-target">{midiToNoteName(props.guide.target())}</strong></span>
                         </Show>
                         <Show when={cents() !== null}>
-                            <span classList={{ 'guide-match': Math.abs(cents()!) <= 35 }}>
-                                {Math.abs(cents()!) <= 35 ? 'Coincide' : (cents()! > 0 ? '+' : '') + cents() + ' cents'}
+                            <span classList={{ 'guide-match': Math.abs(cents()!) <= GUIDE_MATCH_CENTS }}>
+                                {Math.abs(cents()!) <= GUIDE_MATCH_CENTS ? 'Voz afinada' : 'Voz ' + (cents()! > 0 ? '+' : '') + cents() + ' cents'}
                             </span>
                         </Show>
+                        <Show when={pianoMatches()}>
+                            <span class="guide-match" data-testid="guide-piano-match">Tecla correcta</span>
+                        </Show>
                     </p>
+                    <div class="guide-practice-options">
+                        <label class="guide-fade-option">
+                            <input type="checkbox" data-testid="guide-fade-matches" checked={props.fadeMatches}
+                                onChange={(event) => props.onFadeMatches(event.currentTarget.checked)} />
+                            Desvanecer coincidencias
+                        </label>
+                        <GuideVocalRange guide={props.guide} observedRange={props.observedRange} />
+                    </div>
                 </Show>
                 <Show when={props.guide.error()}><p class="guide-error" role="alert">{props.guide.error()}</p></Show>
             </div>

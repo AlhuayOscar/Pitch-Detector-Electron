@@ -24,10 +24,17 @@ const ReturnToLauncher: Component<{ onHome: () => void }> = (props) => {
 const App: Component = () => {
   const [tool, setTool] = createSignal<LauncherTool | null>(null);
   const [returnTarget, setReturnTarget] = createSignal<LauncherTool | null>(null);
+  const [vocalReference, setVocalReference] = createSignal<string>();
 
   const goHome = () => batch(() => {
     setReturnTarget(tool());
+    setVocalReference(undefined);
     setTool(null);
+  });
+
+  const practiceWithVocals = (token: string) => batch(() => {
+    setVocalReference(token);
+    setTool('pitch');
   });
 
   return (
@@ -35,8 +42,8 @@ const App: Component = () => {
       <div class="tool-stage" data-view={tool()}>
         <ReturnToLauncher onHome={goHome} />
         <Switch>
-          <Match when={tool() === 'pitch'}><Demo /></Match>
-          <Match when={tool() === 'vocal-remover'}><VocalRemover /></Match>
+          <Match when={tool() === 'pitch'}><Demo vocalReference={vocalReference()} /></Match>
+          <Match when={tool() === 'vocal-remover'}><VocalRemover onPractice={practiceWithVocals} /></Match>
         </Switch>
       </div>
     </Show>

@@ -6,6 +6,7 @@ directories:
 files:
   - dist/**/*
   - electron/*.cjs
+  - electron/uvr-separate.py
   - LICENSE
 asar: true
 win:

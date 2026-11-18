@@ -383,16 +383,54 @@ kbd {
 .history-chart .note-label { fill: #152820; }
 .history-chart .note, .history-chart .instrument-note { cursor: help; }
 .history-chart .instrument-note { fill: #b29bfb; }
-.history-chart .guide-future-band { fill: #9fc0ff0c; }
-.history-chart .guide-notes, .history-chart .guide-now-line { pointer-events: none; }
+.history-chart .guide-approach-panel {
+    fill: #87adf810;
+    pointer-events: none;
+}
+.history-chart .guide-notes, .history-chart .guide-now-line, .history-chart .guide-match-flash { pointer-events: none; }
 .history-chart .guide-note {
     fill: #9acafa3d;
     stroke: #90b4e58f;
     stroke-width: 1.25px;
     stroke-dasharray: 3 2;
 }
-.history-chart .guide-note-current { stroke: #bdd6ff; }
-.history-chart .guide-now-line { stroke: #a8ccfb9e; stroke-width: 1.25px; }
+.history-chart .guide-note-current { fill: #9acafa76; stroke: #d2e5ff; stroke-dasharray: none; }
+.history-chart .guide-past-note {
+    fill: #9acafa18;
+    stroke: #9bbfff72;
+    stroke-width: 1px;
+    stroke-dasharray: 2 2;
+}
+.history-chart .guide-target-key {
+    fill: #92bcff33;
+    stroke: #b4d3ff;
+    stroke-width: 1.65px;
+    pointer-events: none;
+}
+.history-chart .guide-now-line { stroke: #b4d3ff; stroke-width: 1.65px; }
+.history-chart .guide-note-matched { animation: guide-note-hit 800ms ease-out both; }
+.history-chart .guide-past-note.guide-note-matched { animation-name: guide-past-hit; }
+.history-chart .guide-match-flash {
+    fill: #e1fff8;
+    stroke: #67e8cb;
+    stroke-width: 2px;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: guide-contact-hit 800ms ease-out both;
+}
+.history-chart .guide-match-flash[data-source='instrument'] { stroke: #c5afff; }
+@keyframes guide-note-hit {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+@keyframes guide-past-hit {
+    from { opacity: 1; }
+    to { opacity: 0.34; }
+}
+@keyframes guide-contact-hit {
+    from { opacity: 1; transform: scale(0.65); }
+    to { opacity: 0; transform: scale(1.9); }
+}
 .history-chart .tuning-line {
     stroke: #182a31aa;
     stroke-width: 1;
@@ -407,7 +445,7 @@ kbd {
 }
 .history-chart .time-axis text { font-size: 11px; }
 .history-chart .time-now { fill: #91e6d5; }
-.history-chart .guide-time-now { fill: #c0d8fc; font-weight: 650; text-anchor: middle; }
+.history-chart .guide-time-now { fill: #c0d8fc; font-weight: 650; }
 .history-chart .time-label { fill: #a2b2c5; text-anchor: middle; }
 .history-chart [data-orientation='vertical'] .key-label,
 .history-chart [data-orientation='vertical'] .note-label { text-anchor: middle; }
@@ -415,6 +453,7 @@ kbd {
 
 @media (prefers-reduced-motion: reduce) {
     .history-chart .key { transition: none; }
+    .history-chart .guide-match-flash { animation-name: guide-note-hit; }
 }
 
 .history-empty {

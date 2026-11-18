@@ -1,4 +1,4 @@
-import { batch, createEffect, createSignal, For, onCleanup, onMount, Show, type Component } from 'solid-js';
+import { batch, createEffect, createSignal, For, on, onCleanup, onMount, Show, untrack, type Component } from 'solid-js';
 import { AudioLines, FolderOpen, Mic, RotateCw, Settings2, ShieldCheck, ZoomIn, ZoomOut } from 'lucide-solid';
 import { PitchDetectionService } from '../libs/pitch-detection/pitchDetectionService';
 import PianoRoll from '../components/PianoRoll';
@@ -10,7 +10,7 @@ import { instrumentNames, PitchInstrument, type Instrument } from '../libs/pitch
 import { PitchSessionRecorder } from '../libs/pitch-session-recorder';
 import SavedSessions from '../components/demo/SavedSessions';
 import SongGuidePanel from '../components/demo/SongGuidePanel';
-import { createSongGuide } from '../libs/song-guide';
+import { createSongGuide, GUIDE_MATCH_CENTS } from '../libs/song-guide';
 import '../components/demo/session-tools.css';
 
 const INITIAL_PIXELS_PER_SECOND = 60;
@@ -24,6 +24,13 @@ export interface MidiSegment {
     duration: number;
     avgContinuousMidi: number | null;
     avgConfidence: number;
+    guideId?: number;
+}
+
+export interface GuideMatch {
+    midi: number;
+    atTime: number;
+    source: 'voice' | 'instrument';
 }
 
 interface PitchHistoryPoint {
@@ -32,7 +39,7 @@ interface PitchHistoryPoint {
     continuousMidi: number | null;
 }
 
-const Demo: Component = () => {
+const Demo: Component<{ vocalReference?: string }> = (props) => {
     const [pitch, setPitch] = createSignal<number | null>(null);
     const [confidence, setConfidence] = createSignal(0);
     const [noteDetails, setNoteDetails] = createSignal<NoteDetails | null>(null);
@@ -43,6 +50,8 @@ const Demo: Component = () => {
     const [pixelsPerSecond, setPixelsPerSecond] = createSignal(INITIAL_PIXELS_PER_SECOND);
     const [orientation, setOrientation] = createSignal<'horizontal' | 'vertical'>('horizontal');
     const [showDebugOverlay, setShowDebugOverlay] = createSignal(false);
+    const [fadeMatches, setFadeMatches] = createSignal(false);
+    const [guideMatches, setGuideMatches] = createSignal<ReadonlyMap<number, GuideMatch>>(new Map());
     const [instrument, setInstrument] = createSignal<Instrument>('piano');
     const [playedKeys, setPlayedKeys] = createSignal<ReadonlySet<number>>(new Set());
     const [playedNotes, setPlayedNotes] = createSignal<MidiSegment[]>([]);
@@ -78,9 +87,31 @@ const Demo: Component = () => {
 
     const currentTime = () => (pauseStartTime ?? clock()) - pauseOffset;
     const guide = window.referenceMedia
-        ? createSongGuide(window.referenceMedia, viewEndTime, () => setViewEndTime(currentTime()))
+        ? createSongGuide(window.referenceMedia, viewEndTime, () => setViewEndTime(currentTime()), () => setOrientation('vertical'))
         : undefined;
     const showGuide = () => !!guide?.duration() && !!guide.notes().length;
+
+    createEffect(on(() => [guide?.revision(), fadeMatches()], () => setGuideMatches(new Map())));
+
+    createEffect(() => {
+        if (!guide?.playing() || !fadeMatches()) return;
+        const target = guide.targetNote();
+        const midi = guide.target();
+        if (!target || midi === null) return;
+
+        const sung = state() === 'recording' ? noteDetails()?.continuousMidi : null;
+        const voiceMatches = sung != null && Math.abs(Math.round((sung - midi) * 100)) <= GUIDE_MATCH_CENTS;
+        const instrumentMatches = playedKeys().has(midi);
+        if (!voiceMatches && !instrumentMatches) return;
+
+        const matches = untrack(guideMatches);
+        if (matches.has(target.startMs)) return;
+        setGuideMatches(new Map(matches).set(target.startMs, {
+            midi,
+            atTime: untrack(viewEndTime),
+            source: voiceMatches ? 'voice' : 'instrument',
+        }));
+    });
     const elapsed = (time = currentTime()) => sessionStart === null ? 0 : Math.max(0, Math.round(time - sessionStart));
 
     const showTonality = () => {
@@ -447,6 +478,8 @@ const Demo: Component = () => {
     });
 
     onMount(() => {
+        if (props.vocalReference) void guide?.loadVocals(props.vocalReference);
+
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.key === 'Escape' && showDebugOverlay()) {
                 closeSettings();
@@ -553,7 +586,11 @@ const Demo: Component = () => {
                     <div class="history-header">
                         <div>
                             <h2 id="history-title">Historial de notas</h2>
-                            <span class="history-subtitle">{orientation() === 'vertical' ? 'Piano abajo' : 'Piano a la izquierda'}</span>
+                            <span class="history-subtitle">
+                                {showGuide()
+                                    ? orientation() === 'vertical' ? 'Guía arriba · tu interpretación abajo' : 'Guía a la izquierda · tu interpretación a la derecha'
+                                    : orientation() === 'vertical' ? 'Piano abajo' : 'Piano a la izquierda'}
+                            </span>
                             <div class="history-legend">
                                 <span>Voz</span><span class="legend-instrument">Instrumento</span>
                                 <Show when={showGuide()}><span class="legend-guide">Guía</span></Show>
@@ -591,7 +628,15 @@ const Demo: Component = () => {
                         </div>
                     </div>
                     <Show when={guide}>
-                        {(reference) => <SongGuidePanel guide={reference()} liveMidi={state() === 'recording' ? noteDetails()?.continuousMidi : null} />}
+                        {(reference) => <SongGuidePanel
+                            guide={reference()}
+                            initiallyOpen={!!props.vocalReference}
+                            liveMidi={state() === 'recording' ? noteDetails()?.continuousMidi : null}
+                            playedKeys={playedKeys()}
+                            fadeMatches={fadeMatches()}
+                            onFadeMatches={setFadeMatches}
+                            observedRange={tonality().range}
+                        />}
                     </Show>
                     <div id="history-chart" class="history-chart" classList={{ 'history-chart--vertical': orientation() === 'vertical' }}>
                         <PianoRoll
@@ -600,6 +645,7 @@ const Demo: Component = () => {
                             playedKeys={playedKeys()}
                             guideNotes={showGuide() ? guide?.chartNotes() : undefined}
                             guideLookaheadMs={showGuide() ? 6500 : undefined}
+                            guideMatches={fadeMatches() ? guideMatches() : undefined}
                             onNoteStart={playNote}
                             onNoteEnd={releaseNote}
                             viewEndTime={viewEndTime()}

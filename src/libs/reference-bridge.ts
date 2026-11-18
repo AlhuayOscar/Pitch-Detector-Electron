@@ -6,6 +6,7 @@ export interface ReferenceMedia {
 
 export interface ReferenceMediaBridge {
     select(): Promise<ReferenceMedia | null>;
+    selectVocals(token: string): Promise<ReferenceMedia>;
     render(semitones: number): Promise<{ wav: Uint8Array; durationSeconds: number }>;
     cancel(): Promise<void>;
 }

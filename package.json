@@ -1,6 +1,6 @@
 {
   "name": "pitch-detector-desktop",
-  "version": "1.4.0-automatized.1",
+  "version": "1.4.0-automatized.2",
   "private": true,
   "description": "Detector de notas y afinación en tiempo real, sin conexión",
   "author": "Pitch Detector contributors",

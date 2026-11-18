@@ -231,7 +231,7 @@ async function transposeSong(selection, semitones, signal) {
   return shifted;
 }
 
-function registerReferenceMedia(app, entryUrl) {
+function registerReferenceMedia(app, entryUrl, resolveVocalReference) {
   const windows = new WeakMap();
   let ffmpegPromise;
 
@@ -273,6 +273,16 @@ function registerReferenceMedia(app, entryUrl) {
     }
   }
 
+  async function loadSong(state, file, signal) {
+    signal.throwIfAborted();
+    const source = await localSource(file);
+    const ffmpeg = await getFfmpeg();
+    const { pcm, samples, durationSeconds } = await decodeSong(ffmpeg, source, signal);
+    signal.throwIfAborted();
+    state.selection = { ffmpeg, pcm, durationSeconds };
+    return { name: path.basename(file), samples, durationSeconds };
+  }
+
   handle('select', (state, sender) => operate(state, 'select', async (signal) => {
     const window = BrowserWindow.fromWebContents(sender);
     if (!window) throw new Error('No se pudo abrir el selector de archivos.');
@@ -283,14 +293,12 @@ function registerReferenceMedia(app, entryUrl) {
     });
     if (result.canceled) return null;
 
-    signal.throwIfAborted();
-    const file = result.filePaths[0];
-    const source = await localSource(file);
-    const ffmpeg = await getFfmpeg();
-    const { pcm, samples, durationSeconds } = await decodeSong(ffmpeg, source, signal);
-    signal.throwIfAborted();
-    state.selection = { ffmpeg, pcm, durationSeconds };
-    return { name: path.basename(file), samples, durationSeconds };
+    return loadSong(state, result.filePaths[0], signal);
+  }));
+
+  handle('select-vocals', (state, sender, token) => operate(state, 'select', async (signal) => {
+    const file = await resolveVocalReference(sender, token);
+    return loadSong(state, file, signal);
   }));
 
   handle('render', (state, _sender, semitones) => {
@@ -309,4 +317,4 @@ function registerReferenceMedia(app, entryUrl) {
   handle('cancel', (state) => state.operation?.controller.abort(cancellation()));
 }
 
-module.exports = { registerReferenceMedia };
+module.exports = { registerReferenceMedia, findFfmpeg };
