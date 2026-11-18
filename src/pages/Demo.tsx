@@ -9,6 +9,8 @@ import { SessionTonality, type SessionTonalitySummary } from '../utils/sessionTo
 import { instrumentNames, PitchInstrument, type Instrument } from '../libs/pitch-instrument';
 import { PitchSessionRecorder } from '../libs/pitch-session-recorder';
 import SavedSessions from '../components/demo/SavedSessions';
+import SongGuidePanel from '../components/demo/SongGuidePanel';
+import { createSongGuide } from '../libs/song-guide';
 import '../components/demo/session-tools.css';
 
 const INITIAL_PIXELS_PER_SECOND = 60;
@@ -75,6 +77,10 @@ const Demo: Component = () => {
     let pauseStartTime: number | null = null;
 
     const currentTime = () => (pauseStartTime ?? clock()) - pauseOffset;
+    const guide = window.referenceMedia
+        ? createSongGuide(window.referenceMedia, viewEndTime, () => setViewEndTime(currentTime()))
+        : undefined;
+    const showGuide = () => !!guide?.duration() && !!guide.notes().length;
     const elapsed = (time = currentTime()) => sessionStart === null ? 0 : Math.max(0, Math.round(time - sessionStart));
 
     const showTonality = () => {
@@ -145,6 +151,7 @@ const Demo: Component = () => {
     const summarizeSession = () => ({ ...analysis.summarize(), durationMs: elapsed() });
     const pauseSession = () => {
         pauseStartTime ??= clock();
+        guide?.pause();
         releaseAllNotes();
         analysis.observe(null, 0, currentTime());
         showTonality();
@@ -547,7 +554,10 @@ const Demo: Component = () => {
                         <div>
                             <h2 id="history-title">Historial de notas</h2>
                             <span class="history-subtitle">{orientation() === 'vertical' ? 'Piano abajo' : 'Piano a la izquierda'}</span>
-                            <div class="history-legend"><span>Voz</span><span class="legend-instrument">Instrumento</span></div>
+                            <div class="history-legend">
+                                <span>Voz</span><span class="legend-instrument">Instrumento</span>
+                                <Show when={showGuide()}><span class="legend-guide">Guía</span></Show>
+                            </div>
                         </div>
                         <div class="history-tools">
                             <label class="instrument-choice">
@@ -580,11 +590,16 @@ const Demo: Component = () => {
                             </div>
                         </div>
                     </div>
+                    <Show when={guide}>
+                        {(reference) => <SongGuidePanel guide={reference()} liveMidi={state() === 'recording' ? noteDetails()?.continuousMidi : null} />}
+                    </Show>
                     <div id="history-chart" class="history-chart" classList={{ 'history-chart--vertical': orientation() === 'vertical' }}>
                         <PianoRoll
                             notes={segmentedNotes()}
                             playedNotes={playedNotes()}
                             playedKeys={playedKeys()}
+                            guideNotes={showGuide() ? guide?.chartNotes() : undefined}
+                            guideLookaheadMs={showGuide() ? 6500 : undefined}
                             onNoteStart={playNote}
                             onNoteEnd={releaseNote}
                             viewEndTime={viewEndTime()}
@@ -592,10 +607,10 @@ const Demo: Component = () => {
                             orientation={orientation()}
                             activeMidi={state() === 'recording' ? noteDetails()?.continuousMidi : null}
                             activeNote={state() === 'recording' ? noteDetails()?.midi : null}
-                            minMidiNote={36}
-                            maxMidiNote={84}
+                            minMidiNote={Math.min(36, guide?.bounds()?.low ?? 36)}
+                            maxMidiNote={Math.max(84, guide?.bounds()?.high ?? 84)}
                         />
-                        <Show when={segmentedNotes().length === 0 && playedNotes().length === 0}>
+                        <Show when={!showGuide() && segmentedNotes().length === 0 && playedNotes().length === 0}>
                             <div class="history-empty">
                                 <div class="history-empty-icon"><Mic size={23} stroke-width={1.7} aria-hidden="true" /></div>
                                 <strong>{emptyTitle()}</strong>

@@ -24,3 +24,9 @@ contextBridge.exposeInMainWorld('pitchSessions', {
     return () => ipcRenderer.removeListener('pitch-sessions:flush', listener);
   },
 });
+
+contextBridge.exposeInMainWorld('referenceMedia', {
+  select: () => ipcRenderer.invoke('reference-media:select'),
+  render: (semitones) => ipcRenderer.invoke('reference-media:render', semitones),
+  cancel: () => ipcRenderer.invoke('reference-media:cancel'),
+});

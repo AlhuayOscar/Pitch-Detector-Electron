@@ -3,6 +3,7 @@ const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const { registerVocalRemover } = require('./uvr.cjs');
 const { registerPitchSessions } = require('./sessions.cjs');
+const { registerReferenceMedia } = require('./reference-media.cjs');
 
 const appOrigin = 'pitch://app';
 const entryUrl = `${appOrigin}/index.html`;
@@ -23,6 +24,7 @@ const contentSecurityPolicy = [
   "connect-src 'self'",
   "worker-src 'self'",
   "font-src 'self'",
+  "media-src blob:",
   "img-src 'self' data:",
   "base-uri 'none'",
   "frame-ancestors 'none'",
@@ -119,6 +121,7 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   configureSession(session.defaultSession);
   registerVocalRemover(app, entryUrl);
+  registerReferenceMedia(app, entryUrl);
   const guardWindow = registerPitchSessions(app, entryUrl);
   await createWindow(guardWindow);
 }).catch((error) => {

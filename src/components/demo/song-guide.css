@@ -1,0 +1,53 @@
+.song-guide {
+    flex: none;
+    border-bottom: 1px solid var(--border);
+    background: #182435;
+}
+
+.song-guide summary {
+    display: flex;
+    min-height: 36px;
+    padding: 7px 16px;
+    align-items: center;
+    gap: 7px;
+    color: #dbe7f6;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.song-guide summary::marker, .song-guide summary::-webkit-details-marker { display: none; }
+.song-guide summary::after { content: '⌄'; margin-left: auto; color: #abd0e5; }
+.song-guide[open] summary::after { transform: rotate(180deg); }
+.song-guide summary svg { color: #afcbfc; flex: none; }
+
+.guide-file-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #b3c3d7;
+    font-weight: 400;
+    margin-left: 6px;
+}
+
+.guide-playing { color: #9de6cf; font-weight: 500; }
+.song-guide-content { padding: 0 15px 11px; }
+.guide-controls, .guide-scrub, .guide-readings {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+.guide-controls .rotate-button { height: 33px; }
+.guide-controls .instrument-choice { display: flex; align-items: center; }
+.guide-controls .instrument-choice select { min-height: 30px; }
+.guide-scrub { margin-top: 6px; line-height: 18px; font-size: 11px; color: #b5c7dd; }
+.guide-scrub input { flex: 1; min-width: 100px; height: 18px; accent-color: #94b8ff; }
+.guide-progress, .guide-error, .guide-readings { font-size: 11px; color: #bccee0; }
+.guide-progress { display: inline-flex; align-items: center; gap: 6px; }
+.guide-error { margin-top: 7px; color: #ffbbc3; }
+.guide-readings { gap: 6px 14px; min-height: 16px; }
+.guide-readings strong { color: #e6f0ff; }
+.guide-match { color: #a7f5cf; }
+.history-legend .legend-guide::before { border: 1px solid #9bbfff; background: #9bbfff42; }

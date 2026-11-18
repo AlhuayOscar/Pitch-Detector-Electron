@@ -28,6 +28,16 @@ Si Windows bloqueó el micrófono, abrí **Configuración → Privacidad y segur
 - La app guarda automáticamente cada minuto, al pausar, al volver al inicio y al cerrar. **Guardar ahora** crea un punto de guardado manual. En **Sesiones** podés abrir el audio con el reproductor del sistema o abrir la carpeta local. Cada sesión contiene la mezcla WebM y archivos JSON con eventos y resúmenes.
 - Si ejecutás el portátil desde `release/` en tu copia del proyecto, las grabaciones quedan en `Sesiones/` junto a `release/`, fuera de Git. Si la ubicación no admite escritura, se guardan en Documentos, bajo `Pitch Detector Electron/Sesiones`.
 
+## Coordinador de voz en Automatized
+
+La rama experimental agrega **Guía de canción** dentro de **Pitch**. Usa FFmpeg instalado o el que prepara VocalRemover en este proyecto. En la guía, cargá un MP3, WAV, MP4 u otro audio o video local de hasta 10 minutos. Cada archivo puede ocupar hasta 1 GB.
+
+Reproducí la referencia y activá la detección de Pitch para cantar encima. Las notas de la guía aparecen semitransparentes detrás del historial. La línea **Ahora** separa las notas que ya pasaron de las próximas. La guía muestra el rango, la nota objetivo y el desvío de tu voz en cents cuando hay una nota activa.
+
+El selector **Transposición** baja tanto la reproducción como las notas de la guía hasta una octava. La duración se mantiene para que las pistas sigan alineadas. El análisis estima el tono predominante de una línea melódica. Para canciones con acompañamiento fuerte podés usar la pista de voz que exporta VocalRemover.
+
+La guía usa un estimador de frecuencia fundamental basado en YIN. [Artículo de de Cheveigné y Kawahara](https://pubmed.ncbi.nlm.nih.gov/12002874/).
+
 ## VocalRemover
 
 El mosaico **VocalRemover** abre la ventana oficial de Ultimate Vocal Remover 5.6. La separación se ejecuta en el equipo mediante los modelos descargados.
