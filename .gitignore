@@ -91,6 +91,7 @@ out
 .nuxt
 dist
 /release/
+/.uvr/
 
 # Gatsby files
 .cache/

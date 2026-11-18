@@ -5,7 +5,7 @@ directories:
   output: release
 files:
   - dist/**/*
-  - electron/main.cjs
+  - electron/*.cjs
   - LICENSE
 asar: true
 win:

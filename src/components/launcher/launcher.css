@@ -1,0 +1,182 @@
+.launcher {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 26px;
+    width: min(100% - 52px, 510px, max(280px, 100vh - 125px));
+    min-height: 100vh;
+    margin-inline: auto;
+    padding-block: 28px;
+}
+
+.launcher-heading h1 {
+    color: var(--text);
+    font-size: clamp(26px, 4vw, 40px);
+    font-weight: 690;
+    letter-spacing: -0.055em;
+    line-height: 1.1;
+}
+
+.launcher-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+}
+
+.launcher-tile {
+    --tile-accent: #98f0da;
+    --tile-border: #345854;
+    --tile-surface: #112323;
+    --tile-mark: #203b37;
+    --tile-grid: #53c5a112;
+    position: relative;
+    isolation: isolate;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    aspect-ratio: 1;
+    padding: clamp(13px, 2.3vw, 24px);
+    overflow: hidden;
+    border: 1px solid var(--tile-border);
+    border-radius: 21px;
+    color: var(--text);
+    background: var(--tile-surface);
+    text-align: left;
+    transition: border-color 140ms, background-color 140ms;
+}
+
+.launcher-tile::before {
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    background:
+        repeating-linear-gradient(90deg, transparent 0 15px, var(--tile-grid) 15px 16px),
+        repeating-linear-gradient(0deg, transparent 0 15px, var(--tile-grid) 15px 16px);
+    mask-image: linear-gradient(132deg, #000 0%, transparent 62%);
+    content: '';
+}
+
+.launcher-tile-vocals {
+    --tile-accent: #d3baff;
+    --tile-border: #57476f;
+    --tile-surface: #221b30;
+    --tile-mark: #372a4c;
+    --tile-grid: #c69ff51f;
+}
+
+.launcher-tile-wip {
+    --tile-accent: #a2acce;
+    --tile-border: #344053;
+    --tile-surface: #151d2a;
+    --tile-mark: #252e41;
+    --tile-grid: #8994bd0c;
+}
+
+.launcher-tile:not(:disabled):hover {
+    border-color: var(--tile-accent);
+    background: color-mix(in oklab, var(--tile-surface), var(--tile-mark) 40%);
+}
+
+.launcher-mark {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: clamp(45px, 7vw, 64px);
+    aspect-ratio: 1;
+    border: 1px solid var(--tile-border);
+    border-radius: 16px;
+    color: var(--tile-accent);
+    background: var(--tile-mark);
+}
+
+.launcher-mark svg { max-width: 70%; }
+
+.launcher-copy { display: grid; gap: 5px; }
+
+.launcher-tile-name {
+    font-size: clamp(16px, 2.6vw, 25px);
+    font-weight: 680;
+    letter-spacing: -0.04em;
+    line-height: 1.15;
+}
+
+.launcher-tile-detail {
+    color: var(--muted);
+    font-size: clamp(10px, 1.4vw, 13px);
+    line-height: 1.35;
+}
+
+.launcher-tile-wip .launcher-tile-name { color: #c3cbe1; }
+
+.launcher-open-mark {
+    position: absolute;
+    top: clamp(13px, 2.3vw, 24px);
+    right: clamp(13px, 2.3vw, 24px);
+    color: var(--tile-accent);
+}
+
+.tool-stage { --tool-toolbar-height: 48px; }
+
+.tool-toolbar {
+    display: flex;
+    align-items: center;
+    height: var(--tool-toolbar-height);
+    padding-inline: 26px;
+    border-bottom: 1px solid var(--border);
+    background: #0e161e;
+}
+
+.tool-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 0 9px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    color: #bdd0dc;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.tool-back:hover {
+    border-color: var(--border);
+    color: var(--accent);
+    background: #15232d;
+}
+
+.tool-stage .app-shell { min-height: calc(100vh - var(--tool-toolbar-height)); }
+.tool-stage .history-panel { height: calc(100vh - 112px - var(--tool-toolbar-height)); }
+.tool-stage .settings-panel {
+    top: calc(70px + var(--tool-toolbar-height));
+    max-height: calc(100vh - 84px - var(--tool-toolbar-height));
+}
+
+@media (max-width: 800px) {
+    .tool-toolbar { padding-inline: 14px; }
+    .tool-stage .history-panel { height: calc(100vh - 87px - var(--tool-toolbar-height)); }
+    .tool-stage .settings-panel {
+        top: calc(63px + var(--tool-toolbar-height));
+        max-height: calc(100vh - 77px - var(--tool-toolbar-height));
+    }
+}
+
+@media (max-width: 620px) {
+    .launcher { width: min(100% - 32px, 510px, max(280px, 100vh - 120px)); gap: 20px; }
+    .launcher-grid { gap: 11px; }
+    .launcher-tile { border-radius: 14px; }
+    .launcher-mark { border-radius: 11px; }
+    .tool-stage .history-panel { height: 56vh; }
+}
+
+@media (max-width: 340px) {
+    .launcher-open-mark { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .launcher-tile { transition: none; }
+}

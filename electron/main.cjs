@@ -1,6 +1,7 @@
 const { app, BrowserWindow, dialog, Menu, protocol, session } = require('electron');
 const { readFile } = require('node:fs/promises');
 const path = require('node:path');
+const { registerVocalRemover } = require('./uvr.cjs');
 
 const appOrigin = 'pitch://app';
 const entryUrl = `${appOrigin}/index.html`;
@@ -101,6 +102,7 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
   });
 
@@ -113,6 +115,7 @@ function createWindow() {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   configureSession(session.defaultSession);
+  registerVocalRemover(app, entryUrl);
   await createWindow();
 }).catch((error) => {
   console.error(error);
