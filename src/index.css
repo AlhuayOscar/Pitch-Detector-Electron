@@ -359,6 +359,19 @@ kbd {
 .history-chart svg { display: block; }
 
 .history-chart .key { transition: fill-opacity 95ms linear; }
+.history-chart .playable-key { cursor: pointer; touch-action: none; }
+.history-chart .playable-key:hover { stroke: #a79bcc; }
+.history-chart .playable-key:focus-visible {
+    outline: none;
+    stroke: #dcceff;
+    stroke-width: 2;
+}
+.history-chart .played-key {
+    fill: #c5afff;
+    stroke: #c5afff;
+    stroke-width: 1.35;
+    pointer-events: none;
+}
 .history-chart .key-label,
 .history-chart .note-label {
     dominant-baseline: central;
@@ -368,7 +381,8 @@ kbd {
     user-select: none;
 }
 .history-chart .note-label { fill: #152820; }
-.history-chart .note { cursor: help; }
+.history-chart .note, .history-chart .instrument-note { cursor: help; }
+.history-chart .instrument-note { fill: #b29bfb; }
 .history-chart .tuning-line {
     stroke: #182a31aa;
     stroke-width: 1;

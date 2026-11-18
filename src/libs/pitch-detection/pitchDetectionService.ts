@@ -61,6 +61,10 @@ export class PitchDetectionService {
         this.resetThresholdInCents = options?.resetThresholdInCents ?? (() => 100);
     }
 
+    get mediaStream(): MediaStream | null {
+        return this.capture?.stream ?? null;
+    }
+
     async initialize(): Promise<void> {
         if (this.worker) return;
 

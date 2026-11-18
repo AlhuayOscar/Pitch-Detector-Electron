@@ -12,6 +12,15 @@ interface ControlBarProps {
     state: DetectionState;
     error: string | null;
     onToggle: () => void;
+    tonalRange?: string;
+    estimatedKey?: string;
+    session?: {
+        recording: boolean;
+        canSave: boolean;
+        lastSaved?: string;
+        error?: string;
+        save: () => void;
+    };
 }
 
 const frequencyFormat = new Intl.NumberFormat('es', {
@@ -19,6 +28,7 @@ const frequencyFormat = new Intl.NumberFormat('es', {
     maximumFractionDigits: 1,
 });
 const confidenceFormat = new Intl.NumberFormat('es', { style: 'percent' });
+const saveTime = new Intl.DateTimeFormat('es-AR', { timeStyle: 'medium' });
 
 const statusLabels: Record<DetectionState, string> = {
     idle: 'Micrófono apagado',
@@ -65,8 +75,33 @@ const ControlBar: Component<ControlBarProps> = (props) => {
             </div>
 
             <TuningMeter noteDetails={props.noteDetails} />
+            <section class="session-tonality" aria-labelledby="session-tonality-title">
+                <h2 id="session-tonality-title" class="section-label">Tonalidad de la sesión</h2>
+                <dl>
+                    <div><dt>Rango de voz</dt><dd data-testid="vocal-range">{props.tonalRange ?? '—'}</dd></div>
+                    <div><dt>Tonalidad estimada</dt><dd data-testid="estimated-key">{props.estimatedKey ?? 'Por determinar'}</dd></div>
+                </dl>
+            </section>
 
             <div class="monitor-actions">
+                <Show when={props.session}>
+                    {(session) => (
+                        <div class="recording-summary">
+                            <Show when={session().recording}>
+                                <span class="recording-live" data-testid="recording-status">Grabando sesión</span>
+                            </Show>
+                            <Show when={session().lastSaved}>
+                                {(at) => <span>Guardada a las {saveTime.format(new Date(at()))}</span>}
+                            </Show>
+                            <Show when={session().error}>
+                                <span class="recording-error" role="alert">{session().error}</span>
+                            </Show>
+                            <Show when={session().canSave}>
+                                <button class="save-session" type="button" onClick={session().save}>Guardar ahora</button>
+                            </Show>
+                        </div>
+                    )}
+                </Show>
                 <div class="capture-status" data-state={props.state} role="status">
                     <span class="status-dot" aria-hidden="true" />
                     <span>{statusLabels[props.state]}</span>

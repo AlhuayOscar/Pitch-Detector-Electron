@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, Menu, protocol, session } = require('electro
 const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const { registerVocalRemover } = require('./uvr.cjs');
+const { registerPitchSessions } = require('./sessions.cjs');
 
 const appOrigin = 'pitch://app';
 const entryUrl = `${appOrigin}/index.html`;
@@ -88,7 +89,7 @@ function configureSession(appSession) {
   });
 }
 
-function createWindow() {
+function createWindow(guardWindow) {
   const window = new BrowserWindow({
     title: 'Pitch Detector',
     width: 1200,
@@ -102,10 +103,12 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      backgroundThrottling: false,
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
 
+  guardWindow(window);
   window.webContents.on('will-navigate', (event) => event.preventDefault());
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.once('ready-to-show', () => window.show());
@@ -116,7 +119,8 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   configureSession(session.defaultSession);
   registerVocalRemover(app, entryUrl);
-  await createWindow();
+  const guardWindow = registerPitchSessions(app, entryUrl);
+  await createWindow(guardWindow);
 }).catch((error) => {
   console.error(error);
   dialog.showErrorBox('Pitch Detector', 'No se pudo abrir la aplicación.');

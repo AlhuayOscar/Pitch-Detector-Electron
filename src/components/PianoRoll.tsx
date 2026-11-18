@@ -5,6 +5,10 @@ import { midiToNoteName } from '../utils/midiUtils';
 
 interface PianoRollProps {
     notes: MidiSegment[];
+    playedNotes?: MidiSegment[];
+    playedKeys?: ReadonlySet<number>;
+    onNoteStart?: (midi: number) => void;
+    onNoteEnd?: (midi: number) => void;
     viewEndTime: number;
     pixelsPerSecond: number;
     orientation?: 'horizontal' | 'vertical';
@@ -33,8 +37,13 @@ const tuningColor = d3.scaleLinear<string>()
 const PianoRoll: Component<PianoRollProps> = (props) => {
     let svgRef!: SVGSVGElement;
     let notesRef!: SVGGElement;
+    let instrumentNotesRef!: SVGGElement;
     let tooltip: d3.Selection<HTMLDivElement, unknown, HTMLElement, unknown> | undefined;
     const [size, setSize] = createSignal({ width: 0, height: 0 });
+    const [focusMidi, setFocusMidi] = createSignal<number>();
+    const heldInputs = new Map<number | string, number>();
+    const clickTimers = new Map<string, number>();
+    const playable = () => props.onNoteStart !== undefined && props.onNoteEnd !== undefined;
     const vertical = () => props.orientation === 'vertical';
     const minMidi = () => props.minMidiNote ?? 36;
     const maxMidi = () => props.maxMidiNote ?? 84;
@@ -63,12 +72,100 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
             const position = timeScale()(seconds);
             return seconds > 0 && position >= (vertical() ? 36 : 60) && position <= timeExtent() - 25;
         }));
-    const notesInView = createMemo(() => props.notes.filter((note): note is PitchedSegment =>
+    const visibleNotes = (notes: MidiSegment[]) => notes.filter((note): note is PitchedSegment =>
         note.avgContinuousMidi !== null &&
         Math.round(note.avgContinuousMidi) >= minMidi() &&
         Math.round(note.avgContinuousMidi) <= maxMidi() &&
         note.endTime >= viewStart() &&
-        note.startTime <= props.viewEndTime));
+        note.startTime <= props.viewEndTime);
+    const notesInView = createMemo(() => visibleNotes(props.notes));
+    const instrumentNotesInView = createMemo(() => visibleNotes(props.playedNotes ?? []));
+
+    function beginKey(input: number | string, midi: number) {
+        if (!playable() || heldInputs.has(input)) return;
+        const alreadyHeld = Array.from(heldInputs.values()).includes(midi);
+        heldInputs.set(input, midi);
+        if (!alreadyHeld) props.onNoteStart?.(midi);
+    }
+
+    function endKey(input: number | string) {
+        const midi = heldInputs.get(input);
+        if (midi === undefined) return;
+        heldInputs.delete(input);
+        if (!Array.from(heldInputs.values()).includes(midi)) props.onNoteEnd?.(midi);
+    }
+
+    function releaseKeys() {
+        const notes = new Set(heldInputs.values());
+        heldInputs.clear();
+        for (const timer of clickTimers.values()) window.clearTimeout(timer);
+        clickTimers.clear();
+        for (const midi of notes) props.onNoteEnd?.(midi);
+    }
+
+    const activationKey = (key: string) => key === ' ' || key === 'Enter';
+    const keyboardInput = (midi: number, key: string) => `keyboard:${midi}:${key}`;
+
+    function handleKeyDown(event: KeyboardEvent, midi: number) {
+        if (!playable() || event.ctrlKey || event.altKey || event.metaKey) return;
+        if (activationKey(event.key)) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!event.repeat) beginKey(keyboardInput(midi, event.key), midi);
+            return;
+        }
+
+        let next: number;
+        switch (event.key) {
+            case 'ArrowUp':
+            case 'ArrowRight':
+                next = midi + 1;
+                break;
+            case 'ArrowDown':
+            case 'ArrowLeft':
+                next = midi - 1;
+                break;
+            case 'Home':
+                next = minMidi();
+                break;
+            case 'End':
+                next = maxMidi();
+                break;
+            default:
+                return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        const target = Math.min(maxMidi(), Math.max(minMidi(), next));
+        svgRef.querySelector<SVGRectElement>(`rect.key[data-midi="${target}"]`)?.focus({ preventScroll: true });
+    }
+
+    function handleKeyUp(event: KeyboardEvent, midi: number) {
+        if (!playable() || !activationKey(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        endKey(keyboardInput(midi, event.key));
+    }
+
+    function handlePointerDown(event: PointerEvent & { currentTarget: SVGRectElement }, midi: number) {
+        if (!playable() || event.button !== 0) return;
+        event.preventDefault();
+        event.currentTarget.focus({ preventScroll: true });
+        event.currentTarget.setPointerCapture(event.pointerId);
+        beginKey(event.pointerId, midi);
+    }
+
+    function handleAccessibleClick(event: MouseEvent, midi: number) {
+        // Assistive technology can activate an SVG button without a pointer or key event.
+        if (!playable() || event.detail !== 0) return;
+        const input = `click:${midi}`;
+        window.clearTimeout(clickTimers.get(input));
+        beginKey(input, midi);
+        clickTimers.set(input, window.setTimeout(() => {
+            clickTimers.delete(input);
+            endKey(input);
+        }, 160));
+    }
 
     function laneRect(midi: number) {
         const start = laneStart(midi);
@@ -95,6 +192,25 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
         return vertical()
             ? { x: laneStart(midi), y: chartHeight() - age - length, width: laneFill(), height: length }
             : { x: age, y: laneStart(midi), width: length, height: laneFill() };
+    }
+
+    function segmentRect(note: PitchedSegment) {
+        const extent = timeExtent();
+        const minimum = Math.min(1, extent);
+        const ageOf = (timestamp: number) => timeScale()((props.viewEndTime - timestamp) / 1000);
+        const age = Math.min(ageOf(note.endTime), extent - minimum);
+        const length = Math.max(minimum, ageOf(note.startTime) - age);
+        return noteRect(Math.round(note.avgContinuousMidi), age, length);
+    }
+
+    function instrumentRect(note: PitchedSegment) {
+        const box = segmentRect(note);
+        if (vertical()) {
+            const width = Math.min(box.width, Math.max(1.5, box.width * 0.32));
+            return { ...box, x: box.x + box.width - width, width };
+        }
+        const height = Math.min(box.height, Math.max(1.5, box.height * 0.32));
+        return { ...box, y: box.y + box.height - height, height };
     }
 
     function keyRect(midi: number) {
@@ -140,13 +256,16 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
     const formattedNote = (midi: number) => midiToNoteName(midi).replace('#', '♯');
     const hideTooltip = () => tooltip?.style('opacity', 0);
 
-    const showTooltip = (event: MouseEvent, note: PitchedSegment) => {
+    const showTooltip = (event: MouseEvent, note: PitchedSegment, instrument = false) => {
         if (!tooltip) return;
         const midi = Math.round(note.avgContinuousMidi);
         const offset = Math.round((note.avgContinuousMidi - midi) * 100);
         const duration = durationFormat.format(note.duration / 1000);
         const confidence = (note.avgConfidence * 100).toFixed(0);
-        tooltip.html(`
+        tooltip.html(instrument ? `
+            <div><strong>${formattedNote(midi)}</strong> · Piano</div>
+            <div>Duración ${duration} s</div>
+        ` : `
             <div><strong>${formattedNote(midi)}</strong> · MIDI ${midi}</div>
             <div>Afinación ${offset > 0 ? '+' : ''}${offset} cents</div>
             <div>Confianza ${confidence} %</div>
@@ -169,22 +288,21 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
         const { width, height } = svgRef.getBoundingClientRect();
         setSize({ width, height });
         tooltip = d3.select<HTMLDivElement, unknown>('#piano-roll-tooltip');
+        window.addEventListener('blur', releaseKeys);
         onCleanup(() => {
             resizeObserver.disconnect();
+            window.removeEventListener('blur', releaseKeys);
+            releaseKeys();
             hideTooltip();
         });
     });
 
     createEffect(() => {
-        const end = props.viewEndTime;
-        const ageOf = (timestamp: number) => timeScale()((end - timestamp) / 1000);
-        const minLength = Math.min(1, timeExtent());
         const rotated = vertical();
         const layout = notesInView().map(note => {
             const midi = Math.round(note.avgContinuousMidi);
-            const age = Math.min(ageOf(note.endTime), timeExtent() - minLength);
-            const duration = Math.max(minLength, ageOf(note.startTime) - age);
-            const box = noteRect(midi, age, duration);
+            const box = segmentRect(note);
+            const duration = rotated ? box.height : box.width;
             const center = pitchScale()(midi);
             const actual = pitchScale()(note.avgContinuousMidi);
             const label = formattedNote(midi);
@@ -243,12 +361,30 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
             .text(entry => entry.label);
     });
 
+    createEffect(() => {
+        const notes = chartWidth() > 0 && chartHeight() > 0 ? instrumentNotesInView() : [];
+        const layout = notes.map(note => ({ note, box: instrumentRect(note) }));
+        d3.select(instrumentNotesRef)
+            .selectAll<SVGRectElement, typeof layout[number]>('rect.instrument-note')
+            .data(layout, entry => `${entry.note.avgContinuousMidi}:${entry.note.startTime}`)
+            .join(enter => enter.append('rect')
+                .attr('class', 'instrument-note')
+                .attr('rx', 1)
+                .on('pointerenter pointermove', (event: MouseEvent, entry) => showTooltip(event, entry.note, true))
+                .on('pointerleave', hideTooltip))
+            .attr('data-midi', entry => entry.note.avgContinuousMidi)
+            .attr('x', entry => entry.box.x)
+            .attr('y', entry => entry.box.y)
+            .attr('width', entry => entry.box.width)
+            .attr('height', entry => entry.box.height);
+    });
+
     return (
         <svg
             ref={svgRef}
             width="100%"
             height="100%"
-            role="img"
+            role={playable() ? 'group' : 'img'}
             data-orientation={vertical() ? 'vertical' : 'horizontal'}
             aria-label={vertical()
                 ? 'Historial de notas. Las notas nuevas suben desde el piano de abajo. La barra marca la altura de la voz.'
@@ -288,7 +424,10 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                     pointer-events="none"
                 />
             }</Show>
-            <g class="keyboard" transform={vertical() ? `translate(${chartLeft()}, ${chartHeight()})` : undefined}>
+            <g class="instrument-notes" transform={translatedChart()} ref={instrumentNotesRef} />
+            <g class="keyboard" role={playable() ? 'group' : undefined}
+                aria-label={playable() ? 'Piano interactivo. Usa las flechas para elegir una tecla y pulsa Enter o Espacio para tocarla.' : undefined}
+                transform={vertical() ? `translate(${chartLeft()}, ${chartHeight()})` : undefined}>
                 <Show when={vertical()}>
                     <rect width={chartWidth()} height={VERTICAL_PIANO_KEYBOARD_HEIGHT} fill="#334152" />
                     <For each={accidentals()}>{midi =>
@@ -299,6 +438,7 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                 <For each={midiRange()}>{midi => {
                     const active = () => livePitch()?.note === midi;
                     const deviation = () => livePitch()?.neighbor === midi;
+                    const played = () => props.playedKeys?.has(midi) ?? false;
                     const isAccidental = blackKeys.has(midi % 12);
                     const keyColor = isAccidental ? '#0f1924' : '#334152';
                     return (
@@ -306,17 +446,37 @@ const PianoRoll: Component<PianoRollProps> = (props) => {
                             <rect {...keyRect(midi)} fill={keyColor} />
                             <rect
                                 class="key"
-                                classList={{ 'active-key': active(), 'deviation-key': deviation() }}
+                                classList={{ 'active-key': active(), 'deviation-key': deviation(), 'playable-key': playable() }}
                                 data-midi={midi}
                                 {...keyRect(midi)}
                                 fill="#67e8cb"
                                 fill-opacity={active() ? 1 : deviation() ? livePitch()!.fill : 0}
+                                role={playable() ? 'button' : undefined}
+                                aria-label={playable() ? formattedNote(midi) : undefined}
+                                aria-pressed={playable() ? played() : undefined}
+                                tabindex={playable() ? (midi === (focusMidi() ?? Math.min(maxMidi(), Math.max(minMidi(), 69))) ? 0 : -1) : undefined}
+                                onFocus={() => setFocusMidi(midi)}
+                                onBlur={() => {
+                                    endKey(keyboardInput(midi, ' '));
+                                    endKey(keyboardInput(midi, 'Enter'));
+                                }}
+                                onKeyDown={event => handleKeyDown(event, midi)}
+                                onKeyUp={event => handleKeyUp(event, midi)}
+                                onPointerDown={event => handlePointerDown(event, midi)}
+                                onPointerUp={event => endKey(event.pointerId)}
+                                onPointerCancel={event => endKey(event.pointerId)}
+                                onLostPointerCapture={event => endKey(event.pointerId)}
+                                onClick={event => handleAccessibleClick(event, midi)}
                             />
-                            <Show when={(vertical() ? laneSize() >= 31 : laneSize() >= 13) || midi % 12 === 0 || active()}>
+                            <Show when={played()}>
+                                <rect class="played-key" data-midi={midi} {...keyRect(midi)}
+                                    fill-opacity={active() ? 0.12 : 0.88} aria-hidden="true" />
+                            </Show>
+                            <Show when={(vertical() ? laneSize() >= 31 : laneSize() >= 13) || midi % 12 === 0 || active() || played()}>
                                 <text class="key-label"
                                     x={vertical() ? pitchScale()(midi) : 8}
                                     y={vertical() ? (isAccidental ? 24 : 44) : pitchScale()(midi)}
-                                    fill={active() ? '#102821' : midi % 12 === 0 ? '#bdf3e7' : '#b5c6d7'}>
+                                    fill={active() || played() ? '#18152a' : midi % 12 === 0 ? '#bdf3e7' : '#b5c6d7'}>
                                     {formattedNote(midi)}
                                 </text>
                             </Show>

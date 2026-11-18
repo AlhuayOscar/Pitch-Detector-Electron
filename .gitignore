@@ -92,6 +92,7 @@ out
 dist
 /release/
 /.uvr/
+/Sesiones/
 
 # Gatsby files
 .cache/

@@ -1,14 +1,20 @@
-import { batch, createEffect, createSignal, onCleanup, onMount, Show, type Component } from 'solid-js';
-import { AudioLines, Mic, RotateCw, Settings2, ShieldCheck, ZoomIn, ZoomOut } from 'lucide-solid';
+import { batch, createEffect, createSignal, For, onCleanup, onMount, Show, type Component } from 'solid-js';
+import { AudioLines, FolderOpen, Mic, RotateCw, Settings2, ShieldCheck, ZoomIn, ZoomOut } from 'lucide-solid';
 import { PitchDetectionService } from '../libs/pitch-detection/pitchDetectionService';
 import PianoRoll from '../components/PianoRoll';
 import ControlBar, { type DetectionState } from '../components/demo/ControlBar';
 import DebugOverlay from '../components/debug/DebugOverlay';
 import { getNoteDetails, type NoteDetails } from '../utils/midiUtils';
+import { SessionTonality, type SessionTonalitySummary } from '../utils/sessionTonality';
+import { instrumentNames, PitchInstrument, type Instrument } from '../libs/pitch-instrument';
+import { PitchSessionRecorder } from '../libs/pitch-session-recorder';
+import SavedSessions from '../components/demo/SavedSessions';
+import '../components/demo/session-tools.css';
 
 const INITIAL_PIXELS_PER_SECOND = 60;
 const MIN_PIXELS_PER_SECOND = 10;
 const MAX_PIXELS_PER_SECOND = 200;
+let pendingSessionSave: Promise<void> = Promise.resolve();
 
 export interface MidiSegment {
     startTime: number;
@@ -35,6 +41,17 @@ const Demo: Component = () => {
     const [pixelsPerSecond, setPixelsPerSecond] = createSignal(INITIAL_PIXELS_PER_SECOND);
     const [orientation, setOrientation] = createSignal<'horizontal' | 'vertical'>('horizontal');
     const [showDebugOverlay, setShowDebugOverlay] = createSignal(false);
+    const [instrument, setInstrument] = createSignal<Instrument>('piano');
+    const [playedKeys, setPlayedKeys] = createSignal<ReadonlySet<number>>(new Set());
+    const [playedNotes, setPlayedNotes] = createSignal<MidiSegment[]>([]);
+    const [tonality, setTonality] = createSignal<SessionTonalitySummary>({});
+    const [showSessions, setShowSessions] = createSignal(false);
+    const [lastSaved, setLastSaved] = createSignal<string>();
+    const [recordingError, setRecordingError] = createSignal<string>();
+    const [recordingReady, setRecordingReady] = createSignal(false);
+    const sessionBridge = window.pitchSessions;
+    const sound = new PitchInstrument();
+    const analysis = new SessionTonality();
 
     const [confidenceThreshold, setConfidenceThreshold] = createSignal(0.65);
     const [pitchChangeThreshold, setPitchChangeThreshold] = createSignal(0.75);
@@ -45,10 +62,93 @@ const Demo: Component = () => {
     const [resetThreshold, setResetThreshold] = createSignal(100);
 
     let settingsButton: HTMLButtonElement;
+    let sessionsButton: HTMLButtonElement | undefined;
+    let recorder: PitchSessionRecorder | undefined;
+    let sessionStart: number | null = null;
+    let completedNotes: MidiSegment[] = [];
+    const heldNotes = new Map<number, { startedAt: number | null; instrument: Instrument }>();
+    const clockOrigin = Date.now() - performance.now();
+    const clock = () => clockOrigin + performance.now();
     let serviceInstance: PitchDetectionService | null = null;
     let pitchHistory: PitchHistoryPoint[] = [];
     let pauseOffset = 0;
     let pauseStartTime: number | null = null;
+
+    const currentTime = () => (pauseStartTime ?? clock()) - pauseOffset;
+    const elapsed = (time = currentTime()) => sessionStart === null ? 0 : Math.max(0, Math.round(time - sessionStart));
+
+    const showTonality = () => {
+        const next = analysis.summarize();
+        setTonality(before => before.range === next.range && before.key === next.key ? before : next);
+    };
+
+    const instrumentSegment = (midi: number, startedAt: number, now: number): MidiSegment => ({
+        startTime: startedAt,
+        endTime: now,
+        duration: Math.max(0, now - startedAt),
+        avgContinuousMidi: midi,
+        avgConfidence: 1,
+    });
+
+    const refreshPlayedNotes = (now: number) => {
+        completedNotes = completedNotes.filter(note => note.endTime >= now - 10 * 60 * 1000);
+        const active: MidiSegment[] = [];
+        for (const [midi, note] of heldNotes) {
+            if (note.startedAt !== null) active.push(instrumentSegment(midi, note.startedAt, now));
+        }
+        setPlayedNotes([...completedNotes, ...active]);
+    };
+
+    const registerPlayedNote = (midi: number, instrumentName: Instrument, action: 'on' | 'off', time: number) => {
+        recorder?.add({ atMs: elapsed(time), source: 'instrument', midi, action, instrument: instrumentName });
+    };
+
+    const playNote = (midi: number) => {
+        if (heldNotes.has(midi)) return;
+        const chosen = instrument();
+        try {
+            void sound.resume().catch(() => setRecordingError('No se pudo activar el sonido del instrumento.'));
+            sound.noteOn(midi, chosen);
+        } catch {
+            setRecordingError('No se pudo reproducir el instrumento.');
+            return;
+        }
+        const now = state() === 'recording' ? currentTime() : null;
+        heldNotes.set(midi, { startedAt: now, instrument: chosen });
+        setPlayedKeys(new Set(heldNotes.keys()));
+        if (now !== null) {
+            registerPlayedNote(midi, chosen, 'on', now);
+            refreshPlayedNotes(now);
+            setViewEndTime(now);
+        }
+    };
+
+    const releaseNote = (midi: number) => {
+        const note = heldNotes.get(midi);
+        if (!note) return;
+        heldNotes.delete(midi);
+        sound.noteOff(midi);
+        setPlayedKeys(new Set(heldNotes.keys()));
+        if (note.startedAt !== null) {
+            const now = currentTime();
+            registerPlayedNote(midi, note.instrument, 'off', now);
+            completedNotes.push(instrumentSegment(midi, note.startedAt, now));
+            refreshPlayedNotes(now);
+            setViewEndTime(now);
+        }
+    };
+
+    const releaseAllNotes = () => {
+        for (const midi of heldNotes.keys()) releaseNote(midi);
+    };
+
+    const summarizeSession = () => ({ ...analysis.summarize(), durationMs: elapsed() });
+    const pauseSession = () => {
+        pauseStartTime ??= clock();
+        releaseAllNotes();
+        analysis.observe(null, 0, currentTime());
+        showTonality();
+    };
 
     const generateMidiSegments = (history: PitchHistoryPoint[]) => {
         if (history.length < 2) return;
@@ -159,8 +259,12 @@ const Demo: Component = () => {
 
     const updatePitch = (frequency: number | null, detectedConfidence: number) => {
         if (state() !== 'recording') return;
-        const now = Date.now() - pauseOffset;
+        const now = currentTime();
         const note = getNoteDetails(frequency);
+        analysis.observe(note?.continuousMidi ?? null, detectedConfidence, now);
+        if (note?.continuousMidi != null) {
+            recorder?.add({ atMs: elapsed(now), source: 'voice', midi: note.continuousMidi, confidence: detectedConfidence });
+        }
         pitchHistory.push({
             x: now,
             confidence: detectedConfidence,
@@ -171,11 +275,17 @@ const Demo: Component = () => {
             setConfidence(detectedConfidence);
             setNoteDetails(note);
             generateMidiSegments(pitchHistory);
+            if (heldNotes.size) refreshPlayedNotes(now);
+            showTonality();
             setViewEndTime(now);
         });
     };
 
     const handleError = (message: string) => {
+        if (state() === 'recording') {
+            pauseSession();
+            void recorder?.pause().catch(() => {});
+        }
         const instance = serviceInstance;
         serviceInstance = null;
         setPitch(null);
@@ -195,12 +305,37 @@ const Demo: Component = () => {
                 return;
             }
 
-            const now = Date.now();
+            const stream = instance.mediaStream;
+            if (sessionBridge && stream) {
+                await pendingSessionSave;
+                if (instance !== serviceInstance) return;
+                recorder ??= new PitchSessionRecorder(
+                    sessionBridge, sound, summarizeSession, setLastSaved, setRecordingError, pauseSession,
+                );
+                try {
+                    await recorder.start(stream);
+                    setRecordingReady(true);
+                } catch (cause) {
+                    console.error('Error al grabar la sesión de Pitch.', cause);
+                    setRecordingError('No se pudo iniciar la grabación. La detección sigue disponible.');
+                    setRecordingReady(false);
+                }
+                if (instance !== serviceInstance) return;
+            }
+
+            const now = clock();
             if (pauseStartTime !== null) {
                 pauseOffset += now - pauseStartTime;
                 pauseStartTime = null;
             }
-            setViewEndTime(now - pauseOffset);
+            const logicalNow = now - pauseOffset;
+            sessionStart ??= logicalNow;
+            for (const [midi, note] of heldNotes) {
+                note.startedAt = logicalNow;
+                registerPlayedNote(midi, note.instrument, 'on', logicalNow);
+            }
+            refreshPlayedNotes(logicalNow);
+            setViewEndTime(logicalNow);
             setState('recording');
         } catch (cause) {
             if (instance === serviceInstance) {
@@ -214,10 +349,12 @@ const Demo: Component = () => {
         if (state() === 'starting' || state() === 'pausing') return;
         if (state() === 'recording' && serviceInstance) {
             const instance = serviceInstance;
-            pauseStartTime = Date.now();
+            pauseSession();
             setState('pausing');
             try {
+                const save = recorder?.pause().catch(() => {});
                 await instance.stop();
+                await save;
                 if (instance === serviceInstance) setState('paused');
             } catch (cause) {
                 if (instance === serviceInstance) {
@@ -229,16 +366,22 @@ const Demo: Component = () => {
         }
 
         setError(null);
+        setRecordingError(undefined);
+        void sound.resume().catch(() => {});
         setState('starting');
         if (serviceInstance) {
             await startProcessing(serviceInstance);
             return;
         }
 
-        pitchHistory = [];
-        setSegmentedNotes([]);
-        pauseOffset = 0;
-        pauseStartTime = null;
+        if (sessionStart === null) {
+            pitchHistory = [];
+            setSegmentedNotes([]);
+            pauseOffset = 0;
+            pauseStartTime = null;
+            analysis.reset();
+            setTonality({});
+        }
         const instance = new PitchDetectionService(
             (frequency, detectedConfidence) => {
                 if (serviceInstance === instance) updatePitch(frequency, detectedConfidence);
@@ -323,7 +466,12 @@ const Demo: Component = () => {
     onCleanup(() => {
         const instance = serviceInstance;
         serviceInstance = null;
+        if (state() === 'recording') pauseSession();
+        else releaseAllNotes();
         void instance?.cleanup();
+        const finish = recorder?.finish() ?? Promise.resolve();
+        pendingSessionSave = finish.catch(() => {});
+        void pendingSessionSave.then(() => sound.dispose()).catch(console.error);
     });
 
     return (
@@ -347,6 +495,18 @@ const Demo: Component = () => {
                     >
                         <RotateCw size={16} aria-hidden="true" /> Rotar sistema
                     </button>
+                    <Show when={sessionBridge}>
+                        <button
+                            ref={sessionsButton}
+                            class="rotate-button"
+                            type="button"
+                            title="Sesiones guardadas"
+                            aria-label="Sesiones guardadas"
+                            onClick={() => setShowSessions(true)}
+                        >
+                            <FolderOpen size={16} aria-hidden="true" /> <span class="session-button-label">Sesiones</span>
+                        </button>
+                    </Show>
                     <button
                         ref={settingsButton}
                         class="icon-button settings-button"
@@ -371,6 +531,15 @@ const Demo: Component = () => {
                     state={state()}
                     error={error()}
                     onToggle={toggleDetection}
+                    tonalRange={tonality().range}
+                    estimatedKey={tonality().key}
+                    session={sessionBridge ? {
+                        recording: recordingReady() && state() === 'recording',
+                        canSave: recordingReady(),
+                        lastSaved: lastSaved(),
+                        error: recordingError(),
+                        save: () => void recorder?.save().catch(() => {}),
+                    } : undefined}
                 />
 
                 <section class="history-panel" aria-labelledby="history-title">
@@ -378,33 +547,46 @@ const Demo: Component = () => {
                         <div>
                             <h2 id="history-title">Historial de notas</h2>
                             <span class="history-subtitle">{orientation() === 'vertical' ? 'Piano abajo' : 'Piano a la izquierda'}</span>
+                            <div class="history-legend"><span>Voz</span><span class="legend-instrument">Instrumento</span></div>
                         </div>
-                        <div class="zoom-actions" role="group" aria-label="Zoom del historial">
-                            <button
-                                class="icon-button"
-                                type="button"
-                                aria-label="Alejar historial"
-                                title="Alejar historial"
-                                disabled={pixelsPerSecond() <= MIN_PIXELS_PER_SECOND}
-                                onClick={() => adjustZoom(1 / 1.4)}
-                            >
-                                <ZoomOut size={18} aria-hidden="true" />
-                            </button>
-                            <button
-                                class="icon-button"
-                                type="button"
-                                aria-label="Acercar historial"
-                                title="Acercar historial"
-                                disabled={pixelsPerSecond() >= MAX_PIXELS_PER_SECOND}
-                                onClick={() => adjustZoom(1.4)}
-                            >
-                                <ZoomIn size={18} aria-hidden="true" />
-                            </button>
+                        <div class="history-tools">
+                            <label class="instrument-choice">
+                                Instrumento
+                                <select value={instrument()} onChange={(event) => setInstrument(event.currentTarget.value as Instrument)}>
+                                    <For each={Object.entries(instrumentNames)}>{([value, label]) => <option value={value}>{label}</option>}</For>
+                                </select>
+                            </label>
+                            <div class="zoom-actions" role="group" aria-label="Zoom del historial">
+                                <button
+                                    class="icon-button"
+                                    type="button"
+                                    aria-label="Alejar historial"
+                                    title="Alejar historial"
+                                    disabled={pixelsPerSecond() <= MIN_PIXELS_PER_SECOND}
+                                    onClick={() => adjustZoom(1 / 1.4)}
+                                >
+                                    <ZoomOut size={18} aria-hidden="true" />
+                                </button>
+                                <button
+                                    class="icon-button"
+                                    type="button"
+                                    aria-label="Acercar historial"
+                                    title="Acercar historial"
+                                    disabled={pixelsPerSecond() >= MAX_PIXELS_PER_SECOND}
+                                    onClick={() => adjustZoom(1.4)}
+                                >
+                                    <ZoomIn size={18} aria-hidden="true" />
+                                </button>
+                            </div>
                         </div>
                     </div>
                     <div id="history-chart" class="history-chart" classList={{ 'history-chart--vertical': orientation() === 'vertical' }}>
                         <PianoRoll
                             notes={segmentedNotes()}
+                            playedNotes={playedNotes()}
+                            playedKeys={playedKeys()}
+                            onNoteStart={playNote}
+                            onNoteEnd={releaseNote}
                             viewEndTime={viewEndTime()}
                             pixelsPerSecond={pixelsPerSecond()}
                             orientation={orientation()}
@@ -413,7 +595,7 @@ const Demo: Component = () => {
                             minMidiNote={36}
                             maxMidiNote={84}
                         />
-                        <Show when={segmentedNotes().length === 0}>
+                        <Show when={segmentedNotes().length === 0 && playedNotes().length === 0}>
                             <div class="history-empty">
                                 <div class="history-empty-icon"><Mic size={23} stroke-width={1.7} aria-hidden="true" /></div>
                                 <strong>{emptyTitle()}</strong>
@@ -442,6 +624,12 @@ const Demo: Component = () => {
                     setSmoothingFactor={setSmoothingFactor}
                     setResetThreshold={setResetThreshold}
                 />
+            </Show>
+            <Show when={showSessions() && sessionBridge}>
+                {(bridge) => <SavedSessions bridge={bridge()} onClose={() => {
+                    setShowSessions(false);
+                    sessionsButton?.focus();
+                }} />}
             </Show>
             <div id="piano-roll-tooltip" class="history-tooltip" aria-hidden="true" />
         </div>
