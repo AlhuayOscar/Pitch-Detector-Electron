@@ -1,125 +1,74 @@
 import * as tf from '@tensorflow/tfjs';
 
-// --- Constants ---
-const NUM_INPUT_SAMPLES = 1024; // TF model input size
-const MODEL_SAMPLE_RATE = 16000; // Expected sample rate for the model
-const PT_OFFSET = 25.58; // Pitch tuning offset
-const PT_SLOPE = 63.07; // Pitch tuning slope
-const CONF_THRESHOLD = 0.8; // Minimum confidence level to consider a pitch valid
-const MODEL_URL = 'https://tfhub.dev/google/tfjs-model/spice/2/default/1'; // SPICE model URL
+const NUM_INPUT_SAMPLES = 1024;
+const CONF_THRESHOLD = 0.8;
+const MODEL_URL = new URL(
+    `${import.meta.env.BASE_URL}models/spice-tfjs-default-v2/model.json`,
+    self.location.href
+).href;
 
-// --- Worker State ---
 let model: tf.GraphModel | null = null;
-let modelLoaded = false;
-/** Buffer to accumulate audio samples until NUM_INPUT_SAMPLES is reached. */
-const sampleBuffer = new Float32Array(NUM_INPUT_SAMPLES);
-/** Current write position in the sampleBuffer. */
-let bufferPos = 0;
 
-/** Converts a model pitch prediction (output unit) to Hertz. */
-function getPitchHz(modelPitch: number): number {
-    const fmin = 10.0; // Minimum frequency the model considers (Hz)
-    const bins_per_octave = 12.0;
-    const cqt_bin = modelPitch * PT_SLOPE + PT_OFFSET;
-    return fmin * Math.pow(2.0, cqt_bin / bins_per_octave);
-}
+function detectPitch(graph: tf.GraphModel, samples: Float32Array) {
+    return tf.tidy(() => {
+        const input = tf.tensor1d(samples);
+        const [uncertaintyTensor, pitchTensor] = graph.execute(
+            { input_audio_samples: input }, ['uncertainty', 'pitch']
+        ) as tf.Tensor[];
+        const uncertainties = uncertaintyTensor.dataSync();
+        const pitches = pitchTensor.dataSync();
 
-/** Loads the SPICE model from TensorFlow Hub. */
-async function loadModel() {
-    if (modelLoaded) return;
-    try {
-        // console.log('[Worker] Loading SPICE model...');
-        await tf.setBackend('webgl');
-        await tf.ready();
-        // console.log(`[Worker] Using TF backend: ${tf.getBackend()}`);
-
-        model = await tf.loadGraphModel(MODEL_URL, { fromTFHub: true });
-        modelLoaded = true;
-        // console.log('[Worker] SPICE model loaded successfully.');
-        self.postMessage({ type: 'model_loaded' });
-    } catch (error: any) {
-        console.error('[Worker] Error loading SPICE model:', error);
-        self.postMessage({ type: 'error', message: `Failed to load model: ${error.message || error}` });
-    }
-}
-
-/** Runs the loaded model on the buffered audio data and posts the result. */
-function runModel() {
-    if (!modelLoaded || !model) return;
-
-    tf.tidy(() => {
-        const inputTensor = tf.tensor(sampleBuffer, [NUM_INPUT_SAMPLES]);
-        try {
-            const outputTensors = model!.execute({ "input_audio_samples": inputTensor }) as tf.Tensor[];
-            const uncertainties = outputTensors[0].dataSync();
-            const pitches = outputTensors[1].dataSync();
-
-            let bestPitchHz: number | null = null;
-            let highestConfidence = -1;
-
-            for (let i = 0; i < pitches.length; ++i) {
-                const confidence = 1.0 - uncertainties[i];
-                if (confidence >= CONF_THRESHOLD && confidence > highestConfidence) {
-                    highestConfidence = confidence;
-                    bestPitchHz = getPitchHz(pitches[i]);
-                }
+        let pitch: number | null = null;
+        let confidence = 0;
+        for (let i = 0; i < pitches.length; i++) {
+            const predictionConfidence = 1 - uncertainties[i];
+            if (predictionConfidence >= CONF_THRESHOLD && predictionConfidence > confidence) {
+                // Calibration constants from the SPICE model card.
+                pitch = 10 * 2 ** ((pitches[i] * 63.07 + 25.58) / 12);
+                confidence = predictionConfidence;
             }
-
-            self.postMessage({
-                type: 'pitch',
-                pitch: bestPitchHz,
-                confidence: highestConfidence >= 0 ? highestConfidence : 0
-            });
-
-            outputTensors.forEach(t => t.dispose());
-
-        } catch (error: any) {
-            console.error("[Worker] Error during model execution:", error);
-            self.postMessage({ type: 'error', message: `Model execution failed: ${error.message}` });
-        } finally {
-            inputTensor.dispose(); // Dispose input tensor
         }
+
+        return { pitch, confidence };
     });
 }
 
-/** Handles incoming messages from the main thread (AudioService). */
-self.onmessage = (event: MessageEvent) => {
-    if (event.data.type === 'audioData') {
-        const audioData: Float32Array = event.data.data;
-        let currentInputPos = 0;
-        while (currentInputPos < audioData.length) {
-            const remainingBufferSpace = sampleBuffer.length - bufferPos;
-            const chunkSize = Math.min(remainingBufferSpace, audioData.length - currentInputPos);
-            sampleBuffer.set(audioData.subarray(currentInputPos, currentInputPos + chunkSize), bufferPos);
-            bufferPos += chunkSize;
-            currentInputPos += chunkSize;
-
-            // If buffer is full, run inference
-            if (bufferPos === sampleBuffer.length) {
-                if (modelLoaded) {
-                    runModel();
-                } else {
-                    // console.warn("[Worker] Model not loaded, dropping filled buffer.");
-                }
-                bufferPos = 0; // Reset buffer position
+async function loadModel() {
+    try {
+        // Explicit IO handler also accepts the desktop app's local protocol.
+        const artifacts = await tf.io.http(MODEL_URL).load();
+        for (const backend of ['webgl', 'cpu']) {
+            let candidate: tf.GraphModel | undefined;
+            try {
+                if (!await tf.setBackend(backend)) continue;
+                candidate = await tf.loadGraphModel(tf.io.fromMemory(artifacts));
+                // Some GPU failures surface only when the graph runs.
+                detectPitch(candidate, new Float32Array(NUM_INPUT_SAMPLES));
+                model = candidate;
+                self.postMessage({ type: 'model_loaded' });
+                return;
+            } catch (error) {
+                candidate?.dispose();
+                console.warn(`No se pudo usar el motor ${backend} para SPICE.`, error);
             }
         }
+        throw new Error('Ningún motor de TensorFlow.js pudo ejecutar el modelo.');
+    } catch (error) {
+        console.error('Error al cargar SPICE.', error);
+        self.postMessage({ type: 'error', message: 'No se pudo cargar el modelo SPICE incluido.' });
     }
-    // Removed 'load' message type handling as model loads immediately
-    // else if (event.data.type === 'load'){
-    //     loadModel();
-    // }
-    else {
-        console.log('[Worker] Received unknown message type:', event.data.type);
+}
+
+self.onmessage = ({ data }: MessageEvent<{ captureId: number; samples: Float32Array }>) => {
+    if (!model) return;
+
+    try {
+        const result = detectPitch(model, data.samples);
+        self.postMessage({ type: 'pitch', captureId: data.captureId, ...result });
+    } catch (error) {
+        console.error('Error al ejecutar SPICE.', error);
+        self.postMessage({ type: 'error', message: 'Se interrumpió el análisis de audio.' });
     }
 };
 
-/** Handles uncaught errors within the worker. */
-self.onerror = (event: ErrorEvent) => {
-    console.error('[Worker] Uncaught error:', event.message, event);
-    self.postMessage({ type: 'error', message: `Worker uncaught error: ${event.message}` });
-};
-
-// console.log('[Worker] Worker script loaded.');
-// Load the model immediately when the worker starts.
-loadModel(); 
+void loadModel();

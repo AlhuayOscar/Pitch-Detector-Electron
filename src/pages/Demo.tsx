@@ -1,133 +1,64 @@
-import {
-    createSignal,
-    onCleanup,
-    onMount,
-    Component,
-    Show,
-    For,
-    createEffect,
-    Accessor
-} from 'solid-js';
+import { batch, createEffect, createSignal, onCleanup, onMount, Show, type Component } from 'solid-js';
+import { AudioLines, Mic, RotateCw, Settings2, ShieldCheck, ZoomIn, ZoomOut } from 'lucide-solid';
 import { PitchDetectionService } from '../libs/pitch-detection/pitchDetectionService';
 import PianoRoll from '../components/PianoRoll';
-import ControlBar from '../components/demo/ControlBar';
+import ControlBar, { type DetectionState } from '../components/demo/ControlBar';
 import DebugOverlay from '../components/debug/DebugOverlay';
-import {
-    getNoteDetails,
-} from '../utils/midiUtils';
-import type { NoteDetails } from '../utils/midiUtils';
-import { ZoomIn, ZoomOut } from 'lucide-solid';
+import { getNoteDetails, type NoteDetails } from '../utils/midiUtils';
 
-// const CHART_DURATION_SECONDS = 20; // Convert to signal
-
-const VIEW_DURATION_SECONDS = 20;
-
-// --- Add state for dynamic duration ---
 const INITIAL_PIXELS_PER_SECOND = 60;
-const MIN_PIXELS_PER_SECOND = 10; // Minimum zoom out
-const MAX_PIXELS_PER_SECOND = 200; // Maximum zoom in
-// --- End Add state ---
+const MIN_PIXELS_PER_SECOND = 10;
+const MAX_PIXELS_PER_SECOND = 200;
 
 export interface MidiSegment {
-    startTime: number; // timestamp ms (represents adjusted time)
-    endTime: number;   // timestamp ms (represents adjusted time)
-    duration: number;  // ms
+    startTime: number;
+    endTime: number;
+    duration: number;
     avgContinuousMidi: number | null;
     avgConfidence: number;
 }
 
 interface PitchHistoryPoint {
-    x: number; // timestamp ms (represents adjusted time)
-    y: number | null;
+    x: number;
     confidence: number;
     continuousMidi: number | null;
 }
 
 const Demo: Component = () => {
-    // --- State Signals ---
     const [pitch, setPitch] = createSignal<number | null>(null);
-    const [confidence, setConfidence] = createSignal<number>(0);
+    const [confidence, setConfidence] = createSignal(0);
     const [noteDetails, setNoteDetails] = createSignal<NoteDetails | null>(null);
-    const [isProcessing, setIsProcessing] = createSignal<boolean>(false);
+    const [state, setState] = createSignal<DetectionState>('idle');
     const [error, setError] = createSignal<string | null>(null);
-    const [isInitializing, setIsInitializing] = createSignal<boolean>(false);
-    const [isServiceReady, setIsServiceReady] = createSignal<boolean>(false);
-    const [pitchHistory, setPitchHistory] = createSignal<PitchHistoryPoint[]>([]);
-    const [fullPitchHistory, setFullPitchHistory] = createSignal<PitchHistoryPoint[]>([]);
     const [segmentedNotes, setSegmentedNotes] = createSignal<MidiSegment[]>([]);
-    // Set initial view window based on current time
-    const initialNow = Date.now(); // Capture initial time
-    const [viewStartTime, setViewStartTime] = createSignal(initialNow - VIEW_DURATION_SECONDS * 1000);
-    const [viewEndTime, setViewEndTime] = createSignal(initialNow);
-    const [startAfterInit, setStartAfterInit] = createSignal(false);
-
-    // --- Add state and ref for width ---
-    const [pianoRollWidth, setPianoRollWidth] = createSignal(0);
-    let pianoRollContainerRef: HTMLDivElement | undefined;
-    // --- End add state ---
-
-    // --- Add state for zoom ---
+    const [viewEndTime, setViewEndTime] = createSignal(Date.now());
     const [pixelsPerSecond, setPixelsPerSecond] = createSignal(INITIAL_PIXELS_PER_SECOND);
-    // --- End add state ---
-
-    // --- Add state for overlay ---
+    const [orientation, setOrientation] = createSignal<'horizontal' | 'vertical'>('horizontal');
     const [showDebugOverlay, setShowDebugOverlay] = createSignal(false);
-    // --- End add state ---
 
-    // State for tracking pause time
-    const [pauseOffset, setPauseOffset] = createSignal(0);
-    const [pauseStartTime, setPauseStartTime] = createSignal(0); // Timestamp when pause started
-
-    let serviceInstance: PitchDetectionService | null = null;
-
-    // --- Constants for Segmentation ---
-    // const CONFIDENCE_THRESHOLD = 0.65;
-    // const PITCH_CHANGE_THRESHOLD_SEMITONES = 0.75;
-    // const MIN_NOTE_DURATION_MS = 80;
-    // const MAX_GAP_MS_FOR_MERGE = 100;
-    // const PITCH_DIFF_FOR_MERGE_SEMITONES = 0.5;
-
-    // --- Hyperparameter Signals ---
     const [confidenceThreshold, setConfidenceThreshold] = createSignal(0.65);
-    const [pitchChangeThreshold, setPitchChangeThreshold] = createSignal(0.75); // semitones
-    const [minNoteDuration, setMinNoteDuration] = createSignal(50); // ms
-    const [maxGapForMerge, setMaxGapForMerge] = createSignal(100); // ms
-    const [pitchDiffForMerge, setPitchDiffForMerge] = createSignal(0.5); // semitones
-    // --- Add Smoothing Signals ---
-    const [smoothingFactor, setSmoothingFactor] = createSignal(0.9); // 0 = none, 0.9 = high
-    const [resetThreshold, setResetThreshold] = createSignal(100); // cents
-    // --- Add Chart Duration Signal ---
-    const [chartDuration, setChartDuration] = createSignal(20); // seconds
-    // --- End Chart Duration Signal ---
-    // --- End Smoothing Signals ---
-    // --- End Hyperparameter Signals ---
+    const [pitchChangeThreshold, setPitchChangeThreshold] = createSignal(0.75);
+    const [minNoteDuration, setMinNoteDuration] = createSignal(50);
+    const [maxGapForMerge, setMaxGapForMerge] = createSignal(100);
+    const [pitchDiffForMerge, setPitchDiffForMerge] = createSignal(0.5);
+    const [smoothingFactor, setSmoothingFactor] = createSignal(0.9);
+    const [resetThreshold, setResetThreshold] = createSignal(100);
 
-    // Helper to get adjusted time (now - total accumulated pause duration)
-    const getAdjustedNow = () => Date.now() - pauseOffset();
-
-    // --- Calculate dynamic duration --- uses signal now
-    const dynamicViewDurationSeconds = () => {
-        const width = pianoRollWidth();
-        const pps = pixelsPerSecond(); // Use signal value
-        if (width <= 0 || pps <= 0) return VIEW_DURATION_SECONDS; // Fallback
-        return Math.max(1, width / pps); // Ensure minimum duration (e.g., 1 second)
-    };
-    // --- End calculate ---
+    let settingsButton: HTMLButtonElement;
+    let serviceInstance: PitchDetectionService | null = null;
+    let pitchHistory: PitchHistoryPoint[] = [];
+    let pauseOffset = 0;
+    let pauseStartTime: number | null = null;
 
     const generateMidiSegments = (history: PitchHistoryPoint[]) => {
-        // This function uses the timestamps already present in history, which are adjusted
-        if (!history || history.length < 2) {
-            // Keep existing segments if history is too short after a potential clear
-            // setSegmentedNotes([]); // Don't clear here necessarily
-            return;
-        }
+        if (history.length < 2) return;
 
         const potentialSegments: MidiSegment[] = [];
         let currentSegmentPoints: { x: number, continuousMidi: number, confidence: number }[] = [];
         let currentSegmentStartTime: number | null = null;
 
         for (let i = 0; i < history.length; i++) {
-            const point = history[i]; // point.x is already adjusted time
+            const point = history[i];
             const isVoiced = point.confidence >= confidenceThreshold() && point.continuousMidi !== null && Number.isFinite(point.continuousMidi);
 
             if (isVoiced) {
@@ -190,14 +121,14 @@ const Demo: Component = () => {
             }
         }
 
-        // Merge logic remains the same, operates on adjusted timestamps
+
         const mergedSegments: MidiSegment[] = [];
         if (potentialSegments.length > 0) {
             mergedSegments.push(potentialSegments[0]);
             for (let i = 1; i < potentialSegments.length; i++) {
                 const prev = mergedSegments[mergedSegments.length - 1];
                 const curr = potentialSegments[i];
-                const gap = curr.startTime - prev.endTime; // Gap in adjusted time
+                const gap = curr.startTime - prev.endTime;
                 const prevMidi = prev.avgContinuousMidi;
                 const currMidi = curr.avgContinuousMidi;
 
@@ -225,250 +156,277 @@ const Demo: Component = () => {
         setSegmentedNotes(mergedSegments);
     };
 
-    const handlePitchUpdate = (smoothedPitchHz: number | null, detectedConfidence: number) => {
-        // Calculate adjusted time for this update
-        const adjustedNow = getAdjustedNow();
 
-        const currentNoteDetails = getNoteDetails(smoothedPitchHz);
-        const currentContinuousMidi = currentNoteDetails?.continuousMidi ?? null;
-        const currentRoundedMidi = currentNoteDetails?.midi ?? null;
-
-        // Update instantaneous values
-        setPitch(smoothedPitchHz);
-        setConfidence(detectedConfidence);
-        setNoteDetails(currentNoteDetails);
-
-        // Update History Data using ADJUSTED time
-        const newHistoryPoint: PitchHistoryPoint = {
-            x: adjustedNow, // Use adjusted time
-            y: currentRoundedMidi,
+    const updatePitch = (frequency: number | null, detectedConfidence: number) => {
+        if (state() !== 'recording') return;
+        const now = Date.now() - pauseOffset;
+        const note = getNoteDetails(frequency);
+        pitchHistory.push({
+            x: now,
             confidence: detectedConfidence,
-            continuousMidi: currentContinuousMidi
-        };
-
-        // Update pitch history (used for display filtering, relative to adjusted time)
-        setPitchHistory(prev => {
-            const updated = [...prev, newHistoryPoint];
-            // Use chartDuration signal here
-            const cutoff = adjustedNow - (chartDuration() * 1000);
-            const timeFiltered = updated.filter(p => p.x >= cutoff);
-            return timeFiltered;
+            continuousMidi: note?.continuousMidi ?? null,
         });
-
-        // Update full history (used for segmentation) using ADJUSTED time
-        setFullPitchHistory(prev => [...prev, newHistoryPoint]);
-
-        // Trigger Segmentation using the history which contains ADJUSTED time
-        generateMidiSegments(fullPitchHistory());
-
-        // Update Piano Roll Time Window using ADJUSTED time
-        setViewEndTime(adjustedNow);
-        setViewStartTime(adjustedNow - dynamicViewDurationSeconds() * 1000);
+        batch(() => {
+            setPitch(frequency);
+            setConfidence(detectedConfidence);
+            setNoteDetails(note);
+            generateMidiSegments(pitchHistory);
+            setViewEndTime(now);
+        });
     };
 
-    const handleError = (errorMessage: string) => {
-        console.error("[Demo Page] Error Handler:", errorMessage);
-        setError(errorMessage);
-        setIsProcessing(false);
-        setIsInitializing(false);
+    const handleError = (message: string) => {
+        const instance = serviceInstance;
+        serviceInstance = null;
+        setPitch(null);
+        setConfidence(0);
         setNoteDetails(null);
-        // Reset history and pause state on error
-        setPitchHistory([]);
-        setFullPitchHistory([]);
-        setSegmentedNotes([]);
-        setPauseOffset(0);
-        setPauseStartTime(0); // Reset pause start time
+        setError(message);
+        setState('error');
+        void instance?.cleanup();
     };
 
-    const handleModelLoaded = () => {
-        setIsInitializing(false);
-        setIsServiceReady(true);
-        // Reset pause state fully on initial load
-        if (pauseStartTime() === 0 && pauseOffset() === 0) { // Check if truly initial load/reset
-            setPauseStartTime(0);
-            setPauseOffset(0);
-        }
-        // Initialize view window based on current adjusted time
-        // The createEffect also handles this, but setting here ensures it's correct before potential auto-start
-        const now = getAdjustedNow();
-        setViewEndTime(now);
-        // Use dynamic duration here for initial load
-        setViewStartTime(now - dynamicViewDurationSeconds() * 1000);
+    const startProcessing = async (instance: PitchDetectionService) => {
+        try {
+            await instance.start();
+            if (instance !== serviceInstance) return;
+            if (!instance.isProcessing) {
+                handleError('No se pudo iniciar la detección. Comprueba el micrófono y vuelve a intentarlo.');
+                return;
+            }
 
-        if (startAfterInit()) {
-            startProcessing(); // Will correctly handle pause state if needed
-            setStartAfterInit(false);
+            const now = Date.now();
+            if (pauseStartTime !== null) {
+                pauseOffset += now - pauseStartTime;
+                pauseStartTime = null;
+            }
+            setViewEndTime(now - pauseOffset);
+            setState('recording');
+        } catch (cause) {
+            if (instance === serviceInstance) {
+                console.error(cause);
+                handleError('No se pudo iniciar la detección. Comprueba el micrófono y vuelve a intentarlo.');
+            }
         }
     };
 
-    const initializeAudio = async () => {
-        if (serviceInstance || isInitializing()) return;
-        setError(null);
-        setIsInitializing(true);
-        setIsServiceReady(false);
-        setStartAfterInit(true); // Flag to start automatically after init completes
-        setNoteDetails(null);
-        // Clear history and reset pause state fully for a fresh start
-        setPitchHistory([]);
-        setFullPitchHistory([]);
-        setSegmentedNotes([]);
-        setPauseOffset(0);
-        setPauseStartTime(0); // Reset pause start time
-
-        // Initialize view window based on adjusted time (offset is 0 now)
-        const now = getAdjustedNow();
-        setViewEndTime(now);
-        // Use dynamic duration here for initial load
-        setViewStartTime(now - dynamicViewDurationSeconds() * 1000);
-
-        // Pass the accessors directly in the options object (no explicit type needed here)
-        const options = {
-            smoothingFactor: smoothingFactor,
-            resetThresholdInCents: resetThreshold
-        };
-        serviceInstance = new PitchDetectionService(handlePitchUpdate, handleError, handleModelLoaded, options);
-        serviceInstance.initialize();
-    };
-
-    const startProcessing = async () => { // Called for initial start AND resume
-        if (!serviceInstance || !isServiceReady() || isProcessing() || isInitializing()) {
-            if (isInitializing()) {
-                setStartAfterInit(true);
+    const toggleDetection = async () => {
+        if (state() === 'starting' || state() === 'pausing') return;
+        if (state() === 'recording' && serviceInstance) {
+            const instance = serviceInstance;
+            pauseStartTime = Date.now();
+            setState('pausing');
+            try {
+                await instance.stop();
+                if (instance === serviceInstance) setState('paused');
+            } catch (cause) {
+                if (instance === serviceInstance) {
+                    console.error(cause);
+                    handleError('No se pudo pausar la detección.');
+                }
             }
             return;
         }
+
         setError(null);
-
-        // If resuming from a pause, calculate duration and update offset
-        if (pauseStartTime() > 0) {
-            const pauseDuration = Date.now() - pauseStartTime();
-            setPauseOffset(prev => prev + pauseDuration);
-            setPauseStartTime(0); // Reset pause start time marker after using it
+        setState('starting');
+        if (serviceInstance) {
+            await startProcessing(serviceInstance);
+            return;
         }
-        // If not resuming (pauseStartTime is 0), pauseOffset remains unchanged
 
-        await serviceInstance.start();
-        // Check if start was successful before setting processing state
-        if (serviceInstance.isProcessing) {
-            setIsProcessing(true);
-        } else if (!error()) { // If start failed but no error was caught by handler
-            handleError("Failed to start audio processing.");
+        pitchHistory = [];
+        setSegmentedNotes([]);
+        pauseOffset = 0;
+        pauseStartTime = null;
+        const instance = new PitchDetectionService(
+            (frequency, detectedConfidence) => {
+                if (serviceInstance === instance) updatePitch(frequency, detectedConfidence);
+            },
+            (message) => {
+                if (serviceInstance === instance) handleError(message);
+            },
+            () => {
+                if (serviceInstance === instance) void startProcessing(instance);
+            },
+            { smoothingFactor, resetThresholdInCents: resetThreshold },
+        );
+        serviceInstance = instance;
+
+        try {
+            await instance.initialize();
+        } catch (cause) {
+            if (instance === serviceInstance) {
+                console.error(cause);
+                handleError('No se pudo cargar el modelo de detección local.');
+            }
         }
     };
 
-    const stopProcessing = async () => { // Called only when pausing/stopping
-        if (!serviceInstance || !isProcessing()) return;
-
-        // Record the time the pause started *before* stopping service
-        setPauseStartTime(Date.now());
-        // DO NOT update pauseOffset here
-
-        await serviceInstance.stop();
-        setIsProcessing(false); // Update state *after* successful stop
-
-        // Final segmentation based on the history using adjusted time
-        generateMidiSegments(fullPitchHistory());
+    const closeSettings = () => {
+        setShowDebugOverlay(false);
+        settingsButton.focus();
     };
 
-    // --- Add Zoom Functions ---
-    const zoomIn = () => {
-        setPixelsPerSecond(prev => Math.min(MAX_PIXELS_PER_SECOND, prev * 1.4));
+    const adjustZoom = (factor: number) => {
+        setPixelsPerSecond(previous =>
+            Math.min(MAX_PIXELS_PER_SECOND, Math.max(MIN_PIXELS_PER_SECOND, previous * factor))
+        );
     };
 
-    const zoomOut = () => {
-        setPixelsPerSecond(prev => Math.max(MIN_PIXELS_PER_SECOND, prev / 1.4));
+    const emptyTitle = () => {
+        if (state() === 'recording') return 'Esperando una nota';
+        if (state() === 'starting') return 'Preparando la detección';
+        return 'Sin notas en el historial';
     };
-    // --- End Zoom Functions ---
+
+    const emptyDetail = () => {
+        if (state() === 'recording') return 'Canta o tararea una nota sostenida.';
+        if (state() === 'paused') return 'Reanuda la detección para volver a escuchar.';
+        if (state() === 'idle') return 'Inicia la detección y canta o tararea una nota.';
+        return null;
+    };
+
+    createEffect(() => {
+        confidenceThreshold();
+        pitchChangeThreshold();
+        minNoteDuration();
+        maxGapForMerge();
+        pitchDiffForMerge();
+        generateMidiSegments(pitchHistory);
+    });
 
     onMount(() => {
-        // Initial view window setup handled by initializeAudio/handleModelLoaded
-
-        // --- Add ResizeObserver ---
-        if (!pianoRollContainerRef) return;
-
-        const resizeObserver = new ResizeObserver(entries => {
-            for (let entry of entries) {
-                // Get width, subtracting padding if necessary (depends on box-sizing)
-                const width = entry.contentRect.width;
-                setPianoRollWidth(width);
-            }
-        });
-
-        resizeObserver.observe(pianoRollContainerRef);
-
-        // Set initial width
-        const initialRect = pianoRollContainerRef.getBoundingClientRect();
-        setPianoRollWidth(initialRect.width);
-
-        // --- Add Keyboard Listener ---
         const handleKeyDown = (event: KeyboardEvent) => {
-            // Toggle Debug Overlay with 'd' - Always toggle regardless of focus
-            if (event.key.toLowerCase() === 'd') {
-                setShowDebugOverlay(prev => !prev);
+            if (event.key === 'Escape' && showDebugOverlay()) {
+                closeSettings();
+                return;
             }
-
-            // Toggle Start/Stop with Space bar
-            if (event.key === ' ') {
-                // Prevent default space bar action (scrolling)
+            if (event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+            if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]')) {
+                return;
+            }
+            if (event.key.toLowerCase() === 'd') {
+                if (showDebugOverlay()) closeSettings();
+                else setShowDebugOverlay(true);
+            }
+            if (event.key === ' ' && !(event.target instanceof Element && event.target.closest('button, a'))) {
                 event.preventDefault();
-                // Only act if focus is not on an input/textarea
-                const activeTag = document.activeElement?.tagName.toLowerCase();
-                if (activeTag !== 'input' && activeTag !== 'textarea') {
-                    if (isProcessing()) {
-                        stopProcessing();
-                    } else if (isInitializing()) {
-                        // Do nothing if already initializing
-                    } else if (!isServiceReady()) {
-                        initializeAudio(); // Will also set flag to start after init
-                    } else {
-                        startProcessing();
-                    }
-                }
+                void toggleDetection();
             }
         };
 
         window.addEventListener('keydown', handleKeyDown);
-        // --- End Keyboard Listener ---
-
-        onCleanup(() => {
-            resizeObserver.disconnect();
-            // --- Remove Keyboard Listener ---
-            window.removeEventListener('keydown', handleKeyDown);
-            // --- End Remove ---
-        });
-        // --- End ResizeObserver ---
+        onCleanup(() => window.removeEventListener('keydown', handleKeyDown));
     });
 
-    onCleanup(async () => {
-        if (serviceInstance) {
-            await serviceInstance.cleanup();
-            serviceInstance = null;
-        }
-        // Reset all relevant state on cleanup
-        setIsProcessing(false);
-        setIsServiceReady(false);
-        setIsInitializing(false);
-        setError(null);
-        setPitch(null);
-        setConfidence(0);
-        setNoteDetails(null);
-        setPitchHistory([]);
-        setFullPitchHistory([]);
-        setSegmentedNotes([]);
-        setStartAfterInit(false);
-        // Reset pause state on cleanup
-        setPauseOffset(0);
-        setPauseStartTime(0); // Reset pause start time
-        setViewStartTime(0);
-        setViewEndTime(0);
+    onCleanup(() => {
+        const instance = serviceInstance;
+        serviceInstance = null;
+        void instance?.cleanup();
     });
 
     return (
-        <div class="flex flex-col h-screen bg-gray-800 font-sans overflow-hidden relative">
+        <div class="app-shell">
+            <header class="app-header">
+                <div class="app-brand">
+                    <span class="app-mark"><AudioLines size={25} stroke-width={1.9} aria-hidden="true" /></span>
+                    <h1>Pitch Detector</h1>
+                </div>
+                <div class="header-actions">
+                    <span class="local-indicator" title="El audio se analiza en este equipo">
+                        <ShieldCheck size={16} aria-hidden="true" /> Sin conexión
+                    </span>
+                    <button
+                        class="rotate-button"
+                        type="button"
+                        aria-pressed={orientation() === 'vertical'}
+                        aria-controls="history-chart"
+                        title={orientation() === 'vertical' ? 'Mostrar el piano a la izquierda' : 'Mostrar el piano abajo'}
+                        onClick={() => setOrientation(current => current === 'horizontal' ? 'vertical' : 'horizontal')}
+                    >
+                        <RotateCw size={16} aria-hidden="true" /> Rotar sistema
+                    </button>
+                    <button
+                        ref={settingsButton}
+                        class="icon-button settings-button"
+                        type="button"
+                        aria-label="Ajustes de detección"
+                        title="Ajustes de detección (D)"
+                        aria-expanded={showDebugOverlay()}
+                        aria-controls={showDebugOverlay() ? 'detection-settings' : undefined}
+                        aria-keyshortcuts="D"
+                        onClick={() => showDebugOverlay() ? closeSettings() : setShowDebugOverlay(true)}
+                    >
+                        <Settings2 size={19} aria-hidden="true" />
+                    </button>
+                </div>
+            </header>
 
-            {/* Conditionally render Debug Overlay */}
+            <main class="app-workspace">
+                <ControlBar
+                    pitch={pitch()}
+                    confidence={confidence()}
+                    noteDetails={noteDetails()}
+                    state={state()}
+                    error={error()}
+                    onToggle={toggleDetection}
+                />
+
+                <section class="history-panel" aria-labelledby="history-title">
+                    <div class="history-header">
+                        <div>
+                            <h2 id="history-title">Historial de notas</h2>
+                            <span class="history-subtitle">{orientation() === 'vertical' ? 'Piano abajo' : 'Piano a la izquierda'}</span>
+                        </div>
+                        <div class="zoom-actions" role="group" aria-label="Zoom del historial">
+                            <button
+                                class="icon-button"
+                                type="button"
+                                aria-label="Alejar historial"
+                                title="Alejar historial"
+                                disabled={pixelsPerSecond() <= MIN_PIXELS_PER_SECOND}
+                                onClick={() => adjustZoom(1 / 1.4)}
+                            >
+                                <ZoomOut size={18} aria-hidden="true" />
+                            </button>
+                            <button
+                                class="icon-button"
+                                type="button"
+                                aria-label="Acercar historial"
+                                title="Acercar historial"
+                                disabled={pixelsPerSecond() >= MAX_PIXELS_PER_SECOND}
+                                onClick={() => adjustZoom(1.4)}
+                            >
+                                <ZoomIn size={18} aria-hidden="true" />
+                            </button>
+                        </div>
+                    </div>
+                    <div id="history-chart" class="history-chart" classList={{ 'history-chart--vertical': orientation() === 'vertical' }}>
+                        <PianoRoll
+                            notes={segmentedNotes()}
+                            viewEndTime={viewEndTime()}
+                            pixelsPerSecond={pixelsPerSecond()}
+                            orientation={orientation()}
+                            activeMidi={state() === 'recording' ? noteDetails()?.continuousMidi : null}
+                            activeNote={state() === 'recording' ? noteDetails()?.midi : null}
+                            minMidiNote={36}
+                            maxMidiNote={84}
+                        />
+                        <Show when={segmentedNotes().length === 0}>
+                            <div class="history-empty">
+                                <div class="history-empty-icon"><Mic size={23} stroke-width={1.7} aria-hidden="true" /></div>
+                                <strong>{emptyTitle()}</strong>
+                                <Show when={emptyDetail()}><p>{emptyDetail()}</p></Show>
+                            </div>
+                        </Show>
+                    </div>
+                </section>
+            </main>
+
             <Show when={showDebugOverlay()}>
                 <DebugOverlay
+                    onClose={closeSettings}
                     confidenceThreshold={confidenceThreshold}
                     pitchChangeThreshold={pitchChangeThreshold}
                     minNoteDuration={minNoteDuration}
@@ -476,7 +434,6 @@ const Demo: Component = () => {
                     pitchDiffForMerge={pitchDiffForMerge}
                     smoothingFactor={smoothingFactor}
                     resetThreshold={resetThreshold}
-                    chartDuration={chartDuration}
                     setConfidenceThreshold={setConfidenceThreshold}
                     setPitchChangeThreshold={setPitchChangeThreshold}
                     setMinNoteDuration={setMinNoteDuration}
@@ -484,68 +441,11 @@ const Demo: Component = () => {
                     setPitchDiffForMerge={setPitchDiffForMerge}
                     setSmoothingFactor={setSmoothingFactor}
                     setResetThreshold={setResetThreshold}
-                    setChartDuration={setChartDuration}
                 />
             </Show>
-
-            {/* Tooltip Container */}
-            <div
-                id="piano-roll-tooltip"
-                class="absolute z-10 p-2 text-xs text-gray-100 bg-gray-900/90 rounded shadow-lg pointer-events-none opacity-0 transition-opacity duration-150"
-                style="backdrop-filter: blur(2px);" // Optional: Adds a blur effect behind the tooltip
-            ></div>
-
-            <main class="flex-grow flex flex-col relative">
-                <div ref={pianoRollContainerRef} class="flex-grow relative">
-                    <div class="absolute inset-0 bg-gray-800 overflow-hidden">
-                        <PianoRoll
-                            notes={segmentedNotes()}
-                            viewStartTime={viewStartTime()}
-                            viewEndTime={viewEndTime()}
-                            minMidiNote={36}
-                            maxMidiNote={84}
-                        />
-                    </div>
-                </div>
-
-                {/* --- Add Zoom Buttons --- */}
-                <div class="absolute bottom-4 right-4 z-10 flex flex-row space-x-2">
-                    <button
-                        onClick={zoomOut}
-                        class="p-2 rounded-full bg-gray-700/70 text-gray-300 hover:bg-gray-600/90 hover:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 backdrop-blur-sm"
-                        aria-label="Zoom Out"
-                        title="Zoom Out (Horizontal)"
-                        disabled={pixelsPerSecond() <= MIN_PIXELS_PER_SECOND}
-                    >
-                        <ZoomOut size={20} />
-                    </button>
-                    <button
-                        onClick={zoomIn}
-                        class="p-2 rounded-full bg-gray-700/70 text-gray-300 hover:bg-gray-600/90 hover:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 backdrop-blur-sm"
-                        aria-label="Zoom In"
-                        title="Zoom In (Horizontal)"
-                        disabled={pixelsPerSecond() >= MAX_PIXELS_PER_SECOND}
-                    >
-                        <ZoomIn size={20} />
-                    </button>
-                </div>
-                {/* --- End Zoom Buttons --- */}
-            </main>
-
-            <ControlBar
-                pitch={pitch}
-                confidence={confidence}
-                noteDetails={noteDetails}
-                isProcessing={isProcessing}
-                isServiceReady={isServiceReady}
-                isInitializing={isInitializing}
-                error={error}
-                onInitialize={initializeAudio} // Resets pause state
-                onStart={startProcessing}     // Updates pauseOffset if resuming
-                onStop={stopProcessing}       // Sets pauseStartTime
-            />
+            <div id="piano-roll-tooltip" class="history-tooltip" aria-hidden="true" />
         </div>
     );
 };
 
-export default Demo; 
+export default Demo;

@@ -1,0 +1,12 @@
+SPICE v2 (TensorFlow.js, default version 2) by Google
+
+Model authors: Beat Gfeller, Christian Frank, Dominik Roblek, Matt Sharifi,
+Marco Tagliasacchi, and Mihajlo Velimirović.
+
+Model card: https://github.com/tensorflow/tfhub.dev/blob/master/assets/docs/google/models/spice/2.md
+TensorFlow.js export: https://www.kaggle.com/models/google/spice/tfJs/default/2
+License: Creative Commons Attribution-NonCommercial 4.0 International
+https://creativecommons.org/licenses/by-nc/4.0/
+
+The model manifest and weight shards are unchanged from sonovice/pitch-detector
+at commit 8f1787a131cb09518e59fff80dc8b127b7b16b64.

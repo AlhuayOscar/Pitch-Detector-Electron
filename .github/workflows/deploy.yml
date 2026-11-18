@@ -1,11 +1,6 @@
 name: Deploy to GitHub Pages
 
 on:
-  # Runs on pushes targeting the default branch
-  push:
-    branches: ["main"] # Or your default branch name
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
@@ -27,15 +22,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Bun # Use official bun setup action
-        uses: oven-sh/setup-bun@v1
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          bun-version: latest # Or specify a version
-      # No need to specify cache separately, setup-bun handles it
+          node-version: '24'
+          cache: npm
       - name: Install dependencies
-        run: bun install
+        run: npm ci
       - name: Build
-        run: bun run build # Assuming your build script is named 'build' in package.json
+        run: npm run build -- --base="/$REPOSITORY_NAME/"
+        env:
+          REPOSITORY_NAME: ${{ github.event.repository.name }}
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact

@@ -1,0 +1,18 @@
+appId: io.github.sonovice.pitchdetector.desktop
+productName: Pitch Detector
+artifactName: Pitch-Detector-${version}-Windows-${arch}-Portable.${ext}
+directories:
+  output: release
+files:
+  - dist/**/*
+  - electron/main.cjs
+  - LICENSE
+asar: true
+win:
+  icon: electron/icon.ico
+  target:
+    - target: portable
+      arch:
+        - x64
+portable:
+  requestExecutionLevel: user

@@ -1,482 +1,222 @@
 import type { Accessor } from 'solid-js';
 
 const MODEL_SAMPLE_RATE = 16000;
-// No longer need ScriptProcessorNode buffer size
-// const SCRIPT_PROCESSOR_BUFFER_SIZE = 1024;
+const WORKLET_PATH = `${import.meta.env.BASE_URL}libs/pitch-detection/pitchForwarderProcessor.js`;
 
-// Define callback types
-/** Callback function type for pitch updates. */
 type PitchUpdateCallback = (pitch: number | null, confidence: number) => void;
-/** Callback function type for reporting errors. */
-type ErrorCallback = (errorMessage: string) => void;
-/** Callback function type for signaling when the service is fully initialized (model loaded). */
+type ErrorCallback = (message: string) => void;
 type ModelLoadedCallback = () => void;
 
-/** Optional parameters for configuring the PitchDetectionService. */
 interface PitchDetectionServiceOptions {
-    /** 
-     * EMA smoothing factor (0 to 1). 0 = No smoothing. Higher values (~0.9) = More smoothing. Defaults to 0.
-     */
     smoothingFactor?: Accessor<number>;
-    /** 
-     * Threshold (in cents) for resetting smoothing. If the difference between the new raw pitch
-     * and the current smoothed pitch exceeds this value, the smoothing is reset to the new pitch.
-     * Helps react faster to large jumps. Defaults to 100 cents (1 semitone).
-     */
     resetThresholdInCents?: Accessor<number>;
 }
 
-// Helper to calculate cents difference between two frequencies
-function getCentsDifference(f1: number, f2: number): number {
-    if (f1 <= 0 || f2 <= 0) return Infinity; // Avoid log(0) or division by zero
-    return 1200 * Math.log2(f1 / f2);
+interface AudioCapture {
+    id: number;
+    context: AudioContext;
+    stream?: MediaStream;
+    source?: MediaStreamAudioSourceNode;
+    forwarder?: AudioWorkletNode;
+    inferencePending: boolean;
 }
 
-/**
- * Manages audio context, microphone input, and communication between the
- * AudioWorklet (for audio capture) and a standard Worker (for TFJS processing)
- * to perform real-time pitch detection.
- */
+type WorkerMessage =
+    | { type: 'model_loaded' }
+    | { type: 'pitch'; captureId: number; pitch: number | null; confidence: number }
+    | { type: 'error'; message: string };
+
+function microphoneError(error: unknown): string {
+    if (error instanceof DOMException) {
+        switch (error.name) {
+            case 'NotAllowedError':
+                return 'Windows bloqueó el micrófono. Permite el acceso al micrófono en Configuración y vuelve a intentarlo.';
+            case 'NotFoundError':
+                return 'No hay un micrófono disponible. Conecta uno y vuelve a intentarlo.';
+            case 'NotReadableError':
+                return 'No se pudo usar el micrófono. Comprueba que esté disponible y vuelve a intentarlo.';
+        }
+    }
+    return 'No se pudo iniciar la captura de audio. Revisa el micrófono y vuelve a intentarlo.';
+}
+
 export class PitchDetectionService {
-    private audioContext: AudioContext | null = null;
-    private microphoneNode: MediaStreamAudioSourceNode | null = null;
-    // private scriptProcessorNode: ScriptProcessorNode | null = null; // Removed
-    private pitchForwarderNode: AudioWorkletNode | null = null; // Added AudioWorkletNode
-    private worker: Worker | null = null; // Standard worker for TFJS processing
-    private mediaStream: MediaStream | null = null;
+    public isInitialized = false;
+    public isProcessing = false;
 
-    // Callbacks
-    private onPitchUpdate: PitchUpdateCallback;
-    private onError: ErrorCallback;
-    private onModelLoaded: ModelLoadedCallback;
-
-    // State flags
-    /** Indicates if the service is initialized (TFJS model loaded in worker). */
-    public isInitialized: boolean = false; // Represents overall readiness (model loaded)
-    // private workletReady = false; // Removed
-    private modelReady = false;
-    /** Indicates if the service is currently capturing and processing audio. */
-    public isProcessing: boolean = false;
-
-    // Smoothing - Make these accessors from options
-    private smoothingFactor: Accessor<number> = () => 0.0; // Default accessor
-    private resetThresholdInCents: Accessor<number> = () => 100.0; // Default accessor
+    private worker: Worker | null = null;
+    private capture: AudioCapture | null = null;
+    private nextCaptureId = 0;
     private smoothedPitch: number | null = null;
+    private readonly smoothingFactor: Accessor<number>;
+    private readonly resetThresholdInCents: Accessor<number>;
 
-    /**
-     * Creates an instance of PitchDetectionService.
-     * @param onPitchUpdate Callback executed when a new pitch is detected.
-     * @param onError Callback executed when an error occurs.
-     * @param onModelLoaded Callback executed when the service is ready.
-     * @param options Optional configuration for the service.
-     */
-    constructor(onPitchUpdate: PitchUpdateCallback, onError: ErrorCallback, onModelLoaded: ModelLoadedCallback, options?: PitchDetectionServiceOptions) {
-        this.onPitchUpdate = onPitchUpdate;
-        this.onError = onError;
-        this.onModelLoaded = onModelLoaded;
-
-        // Store the accessors directly, using defaults if not provided
-        if (options?.smoothingFactor !== undefined) {
-            this.smoothingFactor = options.smoothingFactor;
-        }
-        if (options?.resetThresholdInCents !== undefined) {
-            this.resetThresholdInCents = options.resetThresholdInCents;
-        }
-        // Log the initial values from the accessors
-        console.log(`[PitchDetectionService] Initial Smoothing factor: ${this.smoothingFactor()}, Reset Threshold: ${this.resetThresholdInCents()} cents`);
+    constructor(
+        private readonly onPitchUpdate: PitchUpdateCallback,
+        private readonly onError: ErrorCallback,
+        private readonly onModelLoaded: ModelLoadedCallback,
+        options?: PitchDetectionServiceOptions
+    ) {
+        this.smoothingFactor = options?.smoothingFactor ?? (() => 0);
+        this.resetThresholdInCents = options?.resetThresholdInCents ?? (() => 100);
     }
 
-    /**
-     * Initializes the service by creating the TFJS processing worker.
-     * Waits for the worker to load the model before setting `isInitialized` to true.
-     * AudioContext and AudioWorklet setup are deferred until start().
-     */
     async initialize(): Promise<void> {
-        if (this.isInitialized || this.modelReady) {
-            console.warn("[PitchDetectionService] Already initialized or ready.");
+        if (this.worker) return;
+
+        try {
+            this.worker = new Worker(new URL('./pitchDetectionWorker.ts', import.meta.url), { type: 'module' });
+        } catch (error) {
+            console.error('Error al iniciar el procesador de tono.', error);
+            this.onError('No se pudo iniciar el procesador de tono.');
             return;
         }
-        // Reset state
-        this.isInitialized = false;
-        // this.workletReady = false; // Removed
-        this.modelReady = false;
-        this.isProcessing = false;
-        this.smoothedPitch = null; // Reset smoothed pitch on init
 
-        try {
-            // --- Initialize Standard Worker (for TFJS) ---
-            // console.log("Initializing TFJS audio worker...");
-            this.worker = new Worker(new URL('./pitchDetectionWorker.ts', import.meta.url), {
-                type: 'module'
-            });
-            // console.log("TFJS worker instance created.");
-            this.worker.onmessage = (event: MessageEvent) => {
-                const data = event.data;
-                if (!data || typeof data !== 'object') return;
+        const worker = this.worker;
+        worker.onmessage = ({ data }: MessageEvent<WorkerMessage>) => {
+            if (this.worker !== worker) return;
 
-                if (data.type === 'pitch') {
-                    const detectedPitch = data.pitch as number | null;
-                    const confidence = data.confidence as number;
-
-                    // Read current smoothing values from accessors
-                    const currentSmoothing = Math.max(0, Math.min(0.999, this.smoothingFactor()));
-                    const alpha = 1.0 - currentSmoothing;
-                    const currentResetThreshold = Math.max(0, this.resetThresholdInCents());
-
-                    if (detectedPitch === null) {
-                        this.smoothedPitch = null;
-                    } else {
-                        // Check if we should reset smoothing due to a large jump
-                        const centsDiff = this.smoothedPitch !== null
-                            ? Math.abs(getCentsDifference(detectedPitch, this.smoothedPitch))
-                            : Infinity; // Treat first pitch or reset as infinite difference
-
-                        // Use current reset threshold from accessor
-                        if (centsDiff > currentResetThreshold || this.smoothedPitch === null || alpha === 1.0) {
-                            // Reset or first pitch or no smoothing
-                            this.smoothedPitch = detectedPitch;
-                        } else {
-                            // Apply EMA only for smaller changes
-                            this.smoothedPitch = (detectedPitch * alpha) + (this.smoothedPitch * (1.0 - alpha));
-                        }
+            switch (data.type) {
+                case 'model_loaded':
+                    this.isInitialized = true;
+                    this.onModelLoaded();
+                    break;
+                case 'pitch':
+                    if (this.capture?.id === data.captureId && this.isProcessing) {
+                        this.capture.inferencePending = false;
+                        this.updatePitch(data.pitch, data.confidence);
                     }
-
-                    this.onPitchUpdate(this.smoothedPitch, confidence);
-
-                } else if (data.type === 'model_loaded') {
-                    // console.log("[AudioService] Received 'model_loaded' message from TFJS worker.");
-                    this.modelReady = true;
-                    this.checkInitializationComplete();
-                } else if (data.type === 'error') {
-                    this.onError(`TFJS Worker Error: ${data.message}`);
-                }
-            };
-            this.worker.onerror = (error: ErrorEvent) => {
-                this.onError(`TFJS Worker onerror: ${error.message}`);
-                this.cleanup(); // Assume fatal error
-            };
-
-            // --- Defer AudioContext & AudioWorklet --- 
-            // console.log("AudioContext and AudioWorkletNode setup deferred until start().");
-
-        } catch (error: any) {
-            const errorMessage = `Initialization failed during worker setup: ${error?.message ?? error}`;
-            console.error(errorMessage, error);
-            this.onError(errorMessage);
-            await this.cleanup();
-        }
+                    break;
+                case 'error':
+                    this.failWorker(data.message);
+                    break;
+            }
+        };
+        worker.onerror = (event) => {
+            if (this.worker !== worker) return;
+            console.error('Error del procesador de tono.', event.message);
+            this.failWorker('Se interrumpió el procesador de tono. Vuelve a intentarlo.');
+        };
     }
 
-    /** Checks if the model is loaded and updates the initialization status. */
-    private checkInitializationComplete() {
-        // console.log(`[AudioService] checkInitializationComplete called. modelReady: ${this.modelReady}, isInitialized: ${this.isInitialized}`);
-        if (this.modelReady && !this.isInitialized) {
-            // console.log("[AudioService] Conditions met. Setting isInitialized=true and calling onModelLoaded callback.");
-            this.isInitialized = true;
-            try {
-                this.onModelLoaded(); // Signal readiness to the App
-            } catch (callbackError: any) {
-                console.error("[PitchDetectionService] Error executing onModelLoaded callback:", callbackError);
-                this.onError(`Error in UI model loaded callback: ${callbackError.message}`);
-            }
-            // console.log("[AudioService] Initialization complete (Model ready).");
-        }
+    private failWorker(message: string): void {
+        void this.cleanup();
+        this.onError(message);
     }
 
-    /** Sets up the AudioWorklet node for forwarding audio data. */
-    private async setupAudioWorklet(): Promise<boolean> {
-        if (this.pitchForwarderNode || !this.audioContext) return !!this.pitchForwarderNode;
-
-        try {
-            // console.log("Setting up AudioWorklet (PitchForwarderProcessor)...");
-            try {
-                // **** Manually construct URL relative to base path for pre-compiled JS ****
-                const baseUrl = import.meta.env.BASE_URL || '/';
-                // Update path based on tsc output location within public dir
-                const processorPath = `${baseUrl.endsWith('/') ? baseUrl : baseUrl + '/'}libs/pitch-detection/pitchForwarderProcessor.js`;
-                const processorUrl = new URL(processorPath, window.location.origin);
-
-                console.log('[PitchDetectionService] Attempting to load worklet module from URL:', processorUrl.toString());
-                await this.audioContext.audioWorklet.addModule(processorUrl.toString());
-                console.log("[PitchDetectionService] PitchForwarderProcessor module added successfully (or already added).");
-            } catch (addError: any) {
-                // Ignore error if it's specifically about the module already being added
-                if (!addError.message.includes('already been added')) {
-                    console.error('[PitchDetectionService] Error during addModule:', addError);
-                    throw addError; // Re-throw other errors
-                }
-                console.log("[PitchDetectionService] PitchForwarderProcessor module likely already added.");
-            }
-
-            this.pitchForwarderNode = new AudioWorkletNode(this.audioContext, 'pitch-forwarder-processor');
-            // console.log("PitchForwarderNode created.");
-
-            // --- Setup Message Handling (Worklet -> Service -> Worker) ---
-            this.pitchForwarderNode.port.onmessage = (event: MessageEvent) => {
-                const data = event.data;
-                if (data?.type === 'audioData') {
-                    this.worker?.postMessage({
-                        type: 'audioData',
-                        data: data.data
-                    });
-                } else if (data?.type === 'error') {
-                    this.onError(`PitchForwarderProcessor Error: ${data.message}`);
-                }
-            };
-            this.pitchForwarderNode.port.onmessageerror = (err) => {
-                this.onError(`Error receiving message from PitchForwarderNode port: ${err}`);
-            };
-
-            // No longer need workletReady flag
-            // this.workletReady = true;
-            // this.checkInitializationComplete();
-            return true;
-
-        } catch (error: any) {
-            this.onError(`Failed to setup AudioWorklet: ${error.message}`);
-            return false;
+    private updatePitch(pitch: number | null, confidence: number): void {
+        if (pitch === null || this.smoothedPitch === null) {
+            this.smoothedPitch = pitch;
+        } else {
+            const distance = Math.abs(1200 * Math.log2(pitch / this.smoothedPitch));
+            const threshold = Math.max(0, this.resetThresholdInCents());
+            const smoothing = Math.max(0, Math.min(0.999, this.smoothingFactor()));
+            this.smoothedPitch = distance > threshold
+                ? pitch
+                : pitch * (1 - smoothing) + this.smoothedPitch * smoothing;
         }
+        this.onPitchUpdate(this.smoothedPitch, confidence);
     }
 
-    /** Ensures the AudioContext is created (if necessary) and in a running state. Requires user gesture. */
-    private async ensureAudioContext(): Promise<boolean> {
-        if (!this.audioContext || this.audioContext.state === 'closed') {
-            // console.log("Creating new AudioContext...");
-            try {
-                this.audioContext = new AudioContext({
-                    sampleRate: MODEL_SAMPLE_RATE,
-                    latencyHint: 'interactive',
-                });
-                this.audioContext.onstatechange = () => {
-                    // console.log(`AudioContext state changed to: ${this.audioContext?.state}`);
-                    if (this.audioContext?.state !== 'running' && this.isProcessing) {
-                        this.onError(`AudioContext state changed unexpectedly: ${this.audioContext?.state}`);
-                        this.stopInternal();
-                    }
-                };
-            } catch (e: any) {
-                this.onError(`Failed to create AudioContext: ${e.message}`);
-                return false;
-            }
-        }
-
-        if (this.audioContext.state === 'suspended') {
-            // console.log("Resuming suspended AudioContext...");
-            try {
-                await this.audioContext.resume();
-            } catch (e: any) {
-                this.onError(`Failed to resume AudioContext: ${e.message}`);
-                return false;
-            }
-        }
-
-        if (this.audioContext.state !== 'running') {
-            this.onError(`AudioContext is not running (state: ${this.audioContext.state})`);
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * Starts the audio processing pipeline.
-     * Requires user interaction (e.g., button click) to succeed due to browser autoplay policies.
-     * Ensures AudioContext is running, sets up AudioWorklet, requests microphone permission,
-     * and connects the audio graph.
-     */
     async start(): Promise<void> {
-        // Initialization now means model is ready
-        if (!this.isInitialized || !this.worker) {
-            this.onError("PitchDetectionService not initialized (model not ready?). Initialize first.");
+        const worker = this.worker;
+        if (!this.isInitialized || !worker) {
+            this.onError('El modelo de detección todavía se está cargando.');
             return;
         }
-        // Remove modelReady check here, isInitialized covers it
-        // if (!this.modelReady) { ... }
+        if (this.capture) return;
 
-        if (this.isProcessing) {
-            // console.warn("Audio processing is already active.");
-            return;
-        }
-
-        // --- Ensure AudioContext is running --- 
-        const contextReady = await this.ensureAudioContext();
-        if (!contextReady || !this.audioContext) {
-            this.onError("AudioContext could not be started. Cannot start processing.");
+        let context: AudioContext;
+        try {
+            context = new AudioContext({ sampleRate: MODEL_SAMPLE_RATE, latencyHint: 'interactive' });
+        } catch (error) {
+            console.error('Error al abrir el sistema de audio.', error);
+            this.onError('No se pudo abrir el sistema de audio.');
             return;
         }
 
-        // --- Setup AudioWorklet (Just-in-time) ---
-        // This will create the node if it doesn't exist or return true if it does
-        const workletSetupSuccess = await this.setupAudioWorklet();
-        if (!workletSetupSuccess || !this.pitchForwarderNode) {
-            this.onError("Failed to setup AudioWorklet node. Cannot start processing.");
-            return;
-        }
-
-        // Removed check for isInitialized again, already checked at the start
-        // if (!this.isInitialized) { ... }
+        const capture: AudioCapture = { id: ++this.nextCaptureId, context, inferencePending: false };
+        this.capture = capture;
 
         try {
-            // Reset smoothed pitch when starting
-            this.smoothedPitch = null;
+            await context.resume();
+            if (this.capture !== capture) return;
+            await context.audioWorklet.addModule(new URL(WORKLET_PATH, window.location.href).href);
+            if (this.capture !== capture) return;
 
-            // console.log("Requesting microphone access...");
-            // Get microphone stream only if we don't already have one (or if previous stopped)
-            if (!this.mediaStream || this.mediaStream.getAudioTracks().every(t => t.readyState === 'ended')) {
-                this.mediaStream = await navigator.mediaDevices.getUserMedia({
-                    audio: { channelCount: 1, sampleRate: MODEL_SAMPLE_RATE, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-                    video: false
-                });
-                // console.log("Microphone access granted/re-granted.");
-                // Recreate source node if needed
-                if (this.microphoneNode) {
-                    try { this.microphoneNode.disconnect(); } catch (e) { /* ignore */ } // Disconnect old one if exists
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+                video: false
+            });
+            if (this.capture !== capture) {
+                stream.getTracks().forEach((track) => track.stop());
+                return;
+            }
+
+            capture.stream = stream;
+            const forwarder = new AudioWorkletNode(context, 'pitch-forwarder-processor', {
+                numberOfOutputs: 0,
+                channelCount: 1,
+                channelCountMode: 'explicit'
+            });
+            capture.forwarder = forwarder;
+            forwarder.port.onmessage = ({ data }: MessageEvent<Float32Array>) => {
+                if (this.capture !== capture || capture.inferencePending) return;
+                // Drop frames while SPICE is busy to keep results current on slower machines.
+                capture.inferencePending = true;
+                worker.postMessage({ captureId: capture.id, samples: data }, [data.buffer]);
+            };
+
+            forwarder.onprocessorerror = () => this.failCapture(capture, 'Se interrumpió la captura de audio.');
+            context.onstatechange = () => {
+                if (this.isProcessing && context.state !== 'running') {
+                    this.failCapture(capture, 'Se interrumpió el sistema de audio.');
                 }
-                this.microphoneNode = this.audioContext.createMediaStreamSource(this.mediaStream);
-                // console.log("MediaStreamSource node created/recreated.");
-            } else {
-                // console.log("Using existing MediaStream.");
+            };
+            for (const track of stream.getAudioTracks()) {
+                track.onended = () => this.failCapture(capture, 'El micrófono dejó de estar disponible.');
             }
-
-            // --- Connect the audio graph --- 
-            // Ensure nodes are valid before connecting
-            if (!this.microphoneNode || !this.pitchForwarderNode) {
-                throw new Error("Audio nodes are missing, cannot connect graph.");
-            }
-            try {
-                this.microphoneNode.disconnect(); // Disconnect previous connections just in case
-            } catch (e) { /* ignore */ }
-            this.microphoneNode.connect(this.pitchForwarderNode);
-            // this.pitchForwarderNode.connect(this.audioContext.destination); // Optional passthrough
-            // console.log("Nodes connected: Microphone -> PitchForwarderNode");
-
+            capture.source = context.createMediaStreamSource(stream);
+            capture.source.connect(forwarder);
             this.isProcessing = true;
-            // console.log("Audio processing started.");
-
-        } catch (error: any) {
-            const errorMsg = `Failed to start audio processing: ${error?.message ?? error}`;
-            console.error(errorMsg, error);
-            this.onError(errorMsg);
-            this.stopInternal(); // Cleanup on start failure
+        } catch (error) {
+            console.error('Error al iniciar la captura de audio.', error);
+            this.failCapture(capture, microphoneError(error));
         }
     }
 
-    /** Stops processing and disconnects nodes, keeping the context suspended and tracks active. */
-    private stopInternal(): void {
-        // console.log("Running internal stop...");
-        this.isProcessing = false;
-
-        // Disconnect AudioWorkletNode first
-        if (this.pitchForwarderNode) {
-            try {
-                this.pitchForwarderNode.disconnect();
-                // console.log("PitchForwarderNode disconnected.");
-            } catch (e) {
-                // console.warn("Error disconnecting PitchForwarderNode:", e);
-            }
-        }
-
-        // Disconnect Microphone node
-        if (this.microphoneNode) {
-            try {
-                this.microphoneNode.disconnect();
-                // console.log("Microphone node disconnected.");
-            } catch (e) {
-                // console.warn("Error disconnecting microphone node:", e);
-            }
-            // Don't nullify microphoneNode if using existing stream on restart
-            // this.microphoneNode = null;
-        }
-
-        // Stop media tracks
-        if (this.mediaStream) {
-            // Only stop tracks if we plan to fully cleanup or request a new stream next time
-            // For simple stop/start, suspending context is often enough.
-            // Let's keep tracks active for potential restart via context resume.
-            // this.mediaStream.getTracks().forEach(track => track.stop());
-            // console.log("MediaStream tracks stopped.");
-            // console.log("MediaStream tracks kept active for potential resume.");
-        }
-
-        // console.log("Internal stop completed.");
+    private failCapture(capture: AudioCapture, message: string): void {
+        if (this.capture !== capture) return;
+        void this.stop();
+        this.onError(message);
     }
 
-    /**
-     * Public method to stop audio processing and suspend the AudioContext.
-     */
     async stop(): Promise<void> {
-        // console.log("Stopping audio processing (public method)...");
-        this.stopInternal();
-
-        // Suspend context
-        if (this.audioContext && this.audioContext.state === 'running') {
-            try {
-                // console.log("Suspending AudioContext...");
-                await this.audioContext.suspend();
-                // console.log("AudioContext suspended.");
-            } catch (e: any) {
-                this.onError(`Error suspending AudioContext: ${e?.message}`);
-            }
-        }
-        // console.log("Audio processing stopped (public method).");
-    }
-
-    /**
-     * Completely stops processing, terminates the worker, closes the AudioContext,
-     * and releases all resources. Call this when the service is no longer needed.
-     */
-    async cleanup(): Promise<void> {
-        // console.log("Cleaning up AudioService completely...");
-        this.stopInternal();
-
-        // Terminate the standard worker
-        if (this.worker) {
-            // console.log("Terminating TFJS worker...");
-            this.worker.terminate();
-            this.worker = null;
-        }
-
-        // Clean up AudioWorkletNode reference and listeners
-        if (this.pitchForwarderNode) {
-            try {
-                this.pitchForwarderNode.disconnect();
-                this.pitchForwarderNode.port.onmessage = null;
-                this.pitchForwarderNode.port.onmessageerror = null;
-                // console.log("PitchForwarderNode listeners removed.");
-            } catch (e) {
-                // console.warn("Error cleaning up PitchForwarderNode listeners:", e);
-            }
-            this.pitchForwarderNode = null;
-        }
-
-        // Ensure microphoneNode is nullified during full cleanup
-        this.microphoneNode = null;
-        // Ensure mediaStream tracks are stopped during full cleanup
-        if (this.mediaStream) {
-            this.mediaStream.getTracks().forEach(track => track.stop());
-            // console.log("MediaStream tracks stopped during cleanup.");
-            this.mediaStream = null;
-        }
-
-        // Close the AudioContext
-        if (this.audioContext && this.audioContext.state !== 'closed') {
-            try {
-                // console.log("Closing AudioContext...");
-                if (this.audioContext.onstatechange) {
-                    this.audioContext.onstatechange = null;
-                }
-                await this.audioContext.close();
-                // console.log("AudioContext closed.");
-            } catch (e: any) {
-                console.error(`Error closing AudioContext during cleanup: ${e?.message}`);
-            }
-        }
-        this.audioContext = null;
-
-        this.isInitialized = false;
-        // this.workletReady = false; // Removed
-        this.modelReady = false;
+        const capture = this.capture;
+        this.capture = null;
         this.isProcessing = false;
-        this.smoothedPitch = null; // Reset smoothed pitch on cleanup
-        // console.log("AudioService cleanup finished.");
+        this.smoothedPitch = null;
+        if (!capture) return;
+
+        capture.context.onstatechange = null;
+        capture.source?.disconnect();
+        capture.forwarder?.port.close();
+        capture.stream?.getTracks().forEach((track) => {
+            track.onended = null;
+            track.stop();
+        });
+
+        if (capture.context.state !== 'closed') {
+            await capture.context.close().catch((error) => {
+                console.error('Error al cerrar el sistema de audio.', error);
+            });
+        }
     }
-} 
+
+    async cleanup(): Promise<void> {
+        this.worker?.terminate();
+        this.worker = null;
+        this.isInitialized = false;
+        await this.stop();
+    }
+}
